@@ -28,8 +28,8 @@
         "Typecheck passes"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Scaffold landed: vite 8 + @crxjs/vite-plugin 2.4 + react 18.3 + typescript 5.9 strict + zod 4. `npm run build` produces dist/manifest.json (MV3, name=clipcv v0.1.0) + service-worker-loader.js + assets/service-worker bundle + icons/{16,48,128}.png — all non-zero. Typecheck clean; dev server boots with HMR."
     },
     {
       "id": "US-002",

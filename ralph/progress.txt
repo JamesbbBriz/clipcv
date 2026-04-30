@@ -5,7 +5,28 @@ Repo: <to-be-set-on-first-commit>
 
 ## Codebase Patterns (will accumulate as work lands)
 
-(none yet — fresh repo)
+- **Build pipeline** is Vite 8 + `@crxjs/vite-plugin` 2.4. Manifest is the
+  canonical source of build entry points: list any new background /
+  content / popup / options entry in `src/manifest.json` and CRXJS picks
+  it up automatically. Do NOT add `rollupOptions.input` manually.
+- **Manifest path convention**: in `src/manifest.json`, refer to source
+  files using their repo-relative path (`src/background/service-worker.ts`)
+  for code, and the public-folder-relative path (`icons/16.png`) for
+  static assets. CRXJS rewrites both to the correct `dist/...` paths at
+  build time.
+- **Icons live in `public/icons/`** and are emitted to `dist/icons/`.
+  Placeholder 1x1 PNGs are committed for now; real 16/48/128 PNGs land
+  in US-013.
+- **Service worker entry**: `src/background/service-worker.ts` with
+  `type: "module"` in the manifest. The SW is killed between events —
+  never hold long-lived in-memory state (US-005+ message handlers must
+  be event-driven).
+- **TypeScript**: strict + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes`.
+  Path alias `@/*` → `src/*` is wired in `tsconfig.json` and `vite.config.ts`.
+- **Dev server port**: 5179 (5173 collides with other local dev). HMR
+  auto-rebuilds the extension; reload the extension in chrome://extensions
+  to pick up SW changes.
+- **No default exports** in new modules — named exports only (CLAUDE.md §9).
 
 ## Execution Order
 
@@ -39,3 +60,51 @@ US-001 → US-002 → US-003 → US-004 → US-005 → US-006 → US-007 → US-
 ---
 
 (per-story log entries appended below as iterations land)
+
+## 2026-04-30 — US-001 — Vite + CRXJS + React + TS scaffold
+
+- Files changed:
+  - package.json: new — vite 8.0.10, @crxjs/vite-plugin 2.4.0,
+    react 18.3.1, react-dom 18.3.1, zod 4.4.1, @types/chrome 0.1.40,
+    @vitejs/plugin-react 6.0.1, typescript 5.9.3. Scripts: dev / build
+    (typecheck + vite build) / typecheck / preview.
+  - package-lock.json: new — locked versions for reproducible installs.
+  - tsconfig.json: new — strict, noUncheckedIndexedAccess,
+    exactOptionalPropertyTypes, DOM + chrome types, jsx=react-jsx,
+    moduleResolution=Bundler, path alias @/* → src/*.
+  - vite.config.ts: new — CRXJS plugin reading ./src/manifest.json,
+    @vitejs/plugin-react, alias @, dev server port 5179.
+  - src/manifest.json: new — Manifest V3, name=clipcv, version=0.1.0,
+    icons 16/48/128, background.service_worker (module type).
+  - src/background/service-worker.ts: new — minimal onInstalled +
+    onStartup loggers; subsequent stories add capture-request handler.
+  - public/icons/{16,48,128}.png: new — 1x1 placeholder PNGs (US-013
+    replaces with real artwork).
+- Verification commands run:
+  - `npm install` → 84 packages added
+  - `npm run typecheck` → OK (tsc --noEmit clean)
+  - `npm run build` → dist/ produced (manifest.json 412 B,
+    service-worker-loader.js 49 B, assets/service-worker.ts-*.js 172 B,
+    icons/{16,48,128}.png each 70 B). All non-zero.
+  - `npm run dev` → CRXJS banner printed, HMR ready in 274 ms.
+  - Manifest validation: programmatic check of all 10 AC sub-conditions
+    (manifest_version=3, name=clipcv, version=0.1.0, icons 16/48/128
+    declared and files exist, service_worker module + file exists) →
+    all PASS.
+  - Forbidden-pattern grep over dist/: no `eval(`, no `new Function`,
+    no `<script` → MV3 §6.1 compliance verified.
+- Codebase patterns established (promoted to top of progress.txt):
+  - Build pipeline driven entirely by manifest.json entries (CRXJS
+    convention). Do not add rollupOptions.input manually.
+  - Manifest paths: src/* for code entries, icons/* for static assets
+    served from public/.
+  - Strict TS with the exactOptional + noUnchecked options enabled
+    project-wide.
+- Notes / surprises:
+  - Vite's published latest is 8.x; @vitejs/plugin-react needed to be
+    bumped from 4.x to 6.0.1 to satisfy `vite ^8` peer.
+  - CRXJS 2.4.0 prints "Unknown input options: platform" warning on
+    dev start — internal rolldown vs rollup option mismatch in the
+    plugin; harmless, dev server still boots and HMR works.
+
+---
