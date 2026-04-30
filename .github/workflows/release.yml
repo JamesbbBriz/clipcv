@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish draft release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify manifest version matches tag
+        run: |
+          set -euo pipefail
+          MANIFEST_VERSION="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("src/manifest.json","utf8")).version)')"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "manifest=${MANIFEST_VERSION} tag=${TAG_VERSION}"
+          if [ "$MANIFEST_VERSION" != "$TAG_VERSION" ]; then
+            echo "release: manifest version (${MANIFEST_VERSION}) does not match tag (${TAG_VERSION})" >&2
+            exit 1
+          fi
+
+      - name: Build
+        run: npm run build
+
+      - name: Package
+        env:
+          CRX_PRIVATE_KEY: ${{ secrets.CRX_PRIVATE_KEY }}
+          SKIP_TAG_PREFLIGHT: '1'
+        run: npm run package
+
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          ZIP_PATH="release/clipcv-v${VERSION}.zip"
+          CRX_PATH="release/clipcv-v${VERSION}.crx"
+          test -s "$ZIP_PATH"
+          test -s "$CRX_PATH"
+          gh release create "${GITHUB_REF_NAME}" \
+            --draft \
+            --title "clipcv ${GITHUB_REF_NAME}" \
+            --notes "Automated build for clipcv ${GITHUB_REF_NAME}. Source: $(git rev-parse HEAD)." \
+            "$ZIP_PATH" \
+            "$CRX_PATH"

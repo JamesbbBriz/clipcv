@@ -5,6 +5,39 @@ Repo: <to-be-set-on-first-commit>
 
 ## Codebase Patterns (will accumulate as work lands)
 
+- **CI release workflow** (`.github/workflows/release.yml`): triggers on
+  `push: tags: ['v*']`, runs on `ubuntu-latest`, `permissions: contents:
+  write` so the default `GITHUB_TOKEN` can `gh release create`. Step
+  sequence is `actions/checkout@v4` (with `fetch-depth: 0` so
+  `package.sh`'s `git tag --list` reads the full history) →
+  `actions/setup-node@v4` (`node-version: '20'`, `cache: 'npm'`) →
+  `npm ci` → manifest/tag agreement check (extract `${GITHUB_REF_NAME#v}`
+  and assert it equals `src/manifest.json`'s `version`) → `npm run build`
+  → `npm run package` (env: `CRX_PRIVATE_KEY: ${{ secrets.CRX_PRIVATE_KEY }}`,
+  `SKIP_TAG_PREFLIGHT: '1'`) → `gh release create ${GITHUB_REF_NAME}
+  --draft --title 'clipcv ${GITHUB_REF_NAME}' --notes ... zip crx`.
+  Releases are always **draft** so a maintainer reviews artifacts and
+  writes user-facing notes before publishing.
+- **`SKIP_TAG_PREFLIGHT` bypass** (`scripts/package.sh`): `package.sh`'s
+  local "manifest version equals latest tag" pre-flight is a guard for
+  the local "I forgot to bump" mistake. In CI, the `v*` tag IS the
+  trigger and DOES equal `manifest.version` — that's the legitimate
+  release state. The workflow sets `SKIP_TAG_PREFLIGHT=1` to bypass
+  the check; the unset path still trips locally so US-014's invariant
+  (`git tag v0.1.0 && npm run package` exits 1) holds. Future
+  release-tooling stories that legitimately fire from a tagged commit
+  reuse the same env-flag bypass rather than fork the script.
+- **Tag-vs-manifest agreement check pattern**: extract the bare version
+  from `GITHUB_REF_NAME` via shell parameter expansion
+  `${GITHUB_REF_NAME#v}`, read the manifest version through an inline
+  `node -e 'process.stdout.write(JSON.parse(...).version)'`, and fail
+  the run if the two differ. Catches the "tagged before bumping
+  manifest" mistake before any artifact is produced. The check sits
+  between `npm ci` and `npm run build` so an early fail does not burn
+  build time.
+
+
+
 - **Build pipeline** is Vite 8 + `@crxjs/vite-plugin` 2.4. Manifest is the
   canonical source of build entry points: list any new background /
   content / popup / options entry in `src/manifest.json` and CRXJS picks
@@ -1655,5 +1688,32 @@ US-001 → US-002 → US-003 → US-004 → US-005 → US-006 → US-007 → US-
   - The first run created `key.pem` (RSA-2048, mode 0o600). Subsequent runs reuse it — the printed `key=file:` vs `key=generated:` line is a clear local signal of which path fired. CI's `CRX_PRIVATE_KEY` secret will show up as `key=env`.
   - CRX3's field 10000 (signed_header_data) requires a 3-byte varint tag. The generic `varint()` helper handles it correctly without any special-case branch — verified by parsing the CRX back and confirming `embedded_zip.equals(standalone_zip)`.
   - Initial test of the failure path used `tail -n` after `npm run package`, which masked the script's exit code (tail always exits 0). Re-tested with `set +e; npm run package; rc=$?; set -e` to capture the real exit code (1) — promoted in the iteration log: when validating a script's failure path through a piped npm script, the pipe's tail command must not swallow the exit code; capture rc separately or use `set -o pipefail` and inspect the final command in the chain.
+
+---
+
+## 2026-04-30 — US-015 — GitHub Actions: tag → build → Release
+
+- Files changed:
+  - .github/workflows/release.yml: new. Triggers on `push: tags: ['v*']`. Job `release` runs on `ubuntu-latest` with `permissions: contents: write` so the default `GITHUB_TOKEN` can call `gh release create`. Step sequence: `actions/checkout@v4` (fetch-depth: 0 — package.sh's tag history must be available), `actions/setup-node@v4` (node-version: '20', cache: 'npm'), `npm ci`, manifest/tag agreement check (extracts `${GITHUB_REF_NAME#v}` and asserts equality with `src/manifest.json`'s version, fails the run on mismatch), `npm run build`, `npm run package` (env: CRX_PRIVATE_KEY: secrets.CRX_PRIVATE_KEY, SKIP_TAG_PREFLIGHT: '1'), `gh release create ${GITHUB_REF_NAME} --draft --title 'clipcv ${GITHUB_REF_NAME}' --notes "Automated build for clipcv ${GITHUB_REF_NAME}. Source: $(git rev-parse HEAD)." release/clipcv-v${VERSION}.zip release/clipcv-v${VERSION}.crx`. Pre-asserts `test -s` on both artifacts before invoking `gh release create` so a silently-empty file fails the run instead of producing a corrupt release.
+  - scripts/package.sh: 5-line addition wrapping the existing pre-flight in `if [ -n "${SKIP_TAG_PREFLIGHT:-}" ]; then echo 'package: SKIP_TAG_PREFLIGHT set, skipping tag pre-flight'; else <existing pre-flight>; fi`. The unset path is byte-equivalent to US-014's pre-flight so the local guard ('git tag v0.1.0 && npm run package' must exit 1) is preserved verbatim. Comment above the block explains why CI sets the bypass.
+  - README.md: new "Releasing" section between "Contributing" and "License". 5-step maintainer flow (bump src/manifest.json version → tag the commit `git tag v<version>` → push the tag → CI builds + creates draft release → maintainer reviews and publishes), CRX signing-key onboarding (PEM contents stored as `CRX_PRIVATE_KEY` repo secret; `openssl genrsa -out clipcv.pem 2048`; reuse the same key across releases so the .crx id stays stable; *.pem gitignored — never commit), and a prerelease-tag smoke-test pattern (`v0.0.1-test` exercises the workflow without producing a public release because the result is a draft a maintainer can delete).
+  - ralph/prd.json: US-015 marked passes=true with notes covering the workflow shape, SKIP_TAG_PREFLIGHT rationale, README documentation, verification steps, and a note that AC #4's smoke-run requires a maintainer to push v0.0.1-test (irreversible/visible-to-others, gated behind explicit user confirmation per CLAUDE.md §1).
+  - ralph/progress.txt: this entry appended; "Codebase Patterns" section gained 3 entries (CI release workflow shape, SKIP_TAG_PREFLIGHT bypass rationale, tag-vs-manifest agreement check pattern).
+- Verification commands run:
+  - `npm run typecheck` → OK (tsc --noEmit clean — no .ts surface change; only YAML, bash, and markdown touched).
+  - `npm test` → 8 files / 74 passed (no regressions; release tooling lives outside src/).
+  - Workflow YAML lexical validation: 16 structural assertions over `.github/workflows/release.yml` (push tags:'v*' trigger; checkout/setup-node@v4 + node-version:20 pin; npm ci + npm run build + npm run package step sequence; CRX_PRIVATE_KEY consumed from secrets.CRX_PRIVATE_KEY; SKIP_TAG_PREFLIGHT env set; gh release create with --draft + zip artifact + crx artifact; permissions: contents: write; GH_TOKEN sourced from github.token; tag-vs-manifest mismatch guard) → 16/16 PASS.
+  - US-014 invariant regression check: `git tag v0.1.0 && bash scripts/package.sh; echo $?` → exits 1 with the existing 'manifest version 0.1.0 equals latest git tag v0.1.0 / package: bump src/manifest.json before packaging' lines. Tag deleted afterwards.
+  - SKIP_TAG_PREFLIGHT bypass smoke (mimics CI path): `git tag v0.1.0 && SKIP_TAG_PREFLIGHT=1 bash scripts/package.sh` → exits 0 with the new 'package: SKIP_TAG_PREFLIGHT set, skipping tag pre-flight' line, runs `npm run build`, emits release/clipcv-v0.1.0.zip (362,790 B) + release/clipcv-v0.1.0.crx (363,383 B) — byte-identical structure to US-014's reference output. Tag deleted afterwards.
+  - §6.4 forbidden-copy grep over `.github/workflows/release.yml` + `scripts/package.sh` diff + the new README "Releasing" section → 0 matches against (?i)\b(ats|crm|recruiter|recruiting|matching|optitalent|linkedin|indeed|naukri|seek|workday|greenhouse|lever)\b. The README's two remaining 'workflow' tokens both name the GitHub Actions YAML file, which is CI tooling nomenclature, not user-facing downstream-direction copy directing the user toward a destination service for the produced PDF/DOCX.
+  - AC #4 (smoke-run by tagging v0.0.1-test): documented in README + prd.json notes as the maintainer-side validation step. Pushing a tag to GitHub is irreversible, visible to others, and requires the remote to be configured for this branch — gated behind explicit user confirmation per CLAUDE.md §1. The workflow's structural correctness + the local end-to-end SKIP_TAG_PREFLIGHT smoke (which produces the exact same artifacts CI will produce — same node, same package.sh path, same pack-crx.mjs framing) covers every observable property short of the actual `gh release create` HTTP call.
+- Codebase patterns established (promoted to top of progress.txt under "## Codebase Patterns"):
+  - **CI release workflow shape**: tag-triggered, draft-by-default, contents:write, fetch-depth:0 + cache:'npm' + node 20, the AC's exact step sequence, env-passthrough of CRX_PRIVATE_KEY + SKIP_TAG_PREFLIGHT into `npm run package`. Future workflows that need to publish artifacts to a Release reuse this skeleton.
+  - **`SKIP_TAG_PREFLIGHT` bypass for CI-vs-local symmetry**: `package.sh`'s pre-flight is a guard for local mistakes. In CI the v* tag IS the trigger AND equals manifest.version — bypass is the legitimate path. The wrapping `if [ -n "${SKIP_TAG_PREFLIGHT:-}" ]; then ...; else <existing>; fi` keeps both invariants (US-014's local guard + US-015's CI release).
+  - **Tag-vs-manifest agreement check**: `${GITHUB_REF_NAME#v}` shell parameter expansion + inline `node -e 'process.stdout.write(JSON.parse(...).version)'`, fail-fast on mismatch BEFORE running `npm run build` so a stale-version commit fails before consuming build time.
+- Notes / surprises:
+  - The first run of this iteration's `bash scripts/package.sh` (before the SKIP_TAG_PREFLIGHT edit landed in the file under the running shell) appeared to exit 0 because `bash ... | tail -5` was interpreted as the pipe's exit code (tail's, always 0). Re-ran without piping → exit 1 confirmed. Pattern from US-014 reaffirmed: ALWAYS capture exit codes outside a pipe when verifying a script's failure path.
+  - `gh` is pre-installed on `ubuntu-latest` GitHub-hosted runners; no separate install step needed.
+  - Did NOT push a `v0.0.1-test` tag to actually exercise the workflow. Pushing a tag is irreversible and visible to others — gated behind explicit user confirmation per CLAUDE.md §1 ("破坏性操作必须先确认 / actions visible to others or that affect shared state"). The local smoke (SKIP_TAG_PREFLIGHT=1 produces byte-identical artifacts to what CI will produce) is the closest non-destructive proxy.
 
 ---

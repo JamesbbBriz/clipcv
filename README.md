@@ -164,6 +164,32 @@ clipcv is MIT-licensed and welcomes contributions.
 For larger changes (new dependency, architectural shift), open an
 issue first to discuss the design.
 
+## Releasing
+
+Releases are produced by GitHub Actions on every `v*` tag push.
+
+1. Bump `version` in `src/manifest.json` and commit.
+2. Tag the commit: `git tag v<version>` (e.g. `git tag v0.2.0`).
+3. Push the tag: `git push origin v<version>`.
+4. The `.github/workflows/release.yml` workflow checks out the tag,
+   installs dependencies (`npm ci`), runs `npm run build`, runs
+   `npm run package`, and creates a **draft** GitHub Release with
+   `release/clipcv-v<version>.zip` and `release/clipcv-v<version>.crx`
+   attached. The release is left in draft state so a maintainer can
+   review the artifacts and write the user-facing notes before
+   publishing.
+5. The CRX signing key is consumed from the `CRX_PRIVATE_KEY` repo
+   secret — a PEM-encoded RSA-2048 private key. Generate it once
+   with `openssl genrsa -out clipcv.pem 2048` and paste the contents
+   into the repository secret. The same key must be used for every
+   subsequent release so the extension's `.crx` keeps a stable id.
+   The PEM must never be committed (`*.pem` is gitignored).
+
+To smoke-test the workflow without producing a public release, push a
+prerelease tag such as `v0.0.1-test`. The workflow still runs and
+attaches the artifacts to a draft release, which a maintainer can
+delete afterward.
+
 ## License
 
 MIT — see [LICENSE](./LICENSE).

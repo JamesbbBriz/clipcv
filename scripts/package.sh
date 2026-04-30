@@ -21,11 +21,18 @@ if [ -z "$VERSION" ]; then
 fi
 
 # Pre-flight: manifest version must differ from the most recent v* tag.
-LAST_TAG=$(git tag --list 'v*' --sort=-v:refname | head -1 || true)
-if [ -n "$LAST_TAG" ] && [ "$LAST_TAG" = "v${VERSION}" ]; then
-  echo "package: manifest version ${VERSION} equals latest git tag ${LAST_TAG}" >&2
-  echo "package: bump src/manifest.json before packaging" >&2
-  exit 1
+# CI sets SKIP_TAG_PREFLIGHT=1 because the v* tag is the trigger and already
+# exists at HEAD with the intended release version — that is the legitimate
+# release path, not a missed bump.
+if [ -n "${SKIP_TAG_PREFLIGHT:-}" ]; then
+  echo "package: SKIP_TAG_PREFLIGHT set, skipping tag pre-flight"
+else
+  LAST_TAG=$(git tag --list 'v*' --sort=-v:refname | head -1 || true)
+  if [ -n "$LAST_TAG" ] && [ "$LAST_TAG" = "v${VERSION}" ]; then
+    echo "package: manifest version ${VERSION} equals latest git tag ${LAST_TAG}" >&2
+    echo "package: bump src/manifest.json before packaging" >&2
+    exit 1
+  fi
 fi
 
 echo "package: building clipcv v${VERSION}"
