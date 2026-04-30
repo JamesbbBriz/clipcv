@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { isDisclaimerAccepted } from '@/lib/storage/disclaimer-store';
-import type { ClipcvMessage, ClipcvResponse } from '@/lib/messaging/messages';
+import { requestCapture } from './capture';
 
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 
@@ -37,15 +37,21 @@ export function FloatingButton(): JSX.Element | null {
 
   async function handleClick(): Promise<void> {
     setSendState('sending');
-    const message: ClipcvMessage = {
-      kind: 'capture-request',
-      url: window.location.href,
-      pageTitle: document.title,
-    };
     try {
-      const response: ClipcvResponse = await chrome.runtime.sendMessage(message);
-      setSendState(response.kind === 'capture-request-ack' ? 'sent' : 'error');
-    } catch {
+      const payload = await requestCapture();
+      // Full pipeline (LLM extraction, render, download) lands in US-008..US-011.
+      // For US-005 the visible signal of success is the captured payload — log
+      // a small summary so the developer can confirm the round-trip works.
+      console.debug('[clipcv] captured', {
+        page_url: payload.page_url,
+        page_title: payload.page_title,
+        captured_at: payload.captured_at,
+        html_bytes: payload.html.length,
+        screenshot_bytes: payload.screenshot_b64.length,
+      });
+      setSendState('sent');
+    } catch (err) {
+      console.debug('[clipcv] capture error', err);
       setSendState('error');
     } finally {
       window.setTimeout(() => setSendState('idle'), 1500);

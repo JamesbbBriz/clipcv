@@ -6,9 +6,15 @@
 
 export type ClipcvMessage = { kind: 'capture-request'; url: string; pageTitle: string };
 
+export type ClipcvErrorReason =
+  | 'unknown_kind'
+  | 'screenshot_failed'
+  | 'no_active_tab'
+  | 'internal';
+
 export type ClipcvResponse =
-  | { kind: 'capture-request-ack'; receivedAt: string }
-  | { kind: 'error'; reason: 'unknown_kind' | 'internal'; detail?: string };
+  | { kind: 'capture-screenshot'; screenshot_b64: string; captured_at: string }
+  | { kind: 'error'; reason: ClipcvErrorReason; detail?: string };
 
 export function isClipcvMessage(value: unknown): value is ClipcvMessage {
   if (value === null || typeof value !== 'object') return false;

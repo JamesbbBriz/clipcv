@@ -98,8 +98,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Service worker handles capture-request via async sendResponse (returns true to keep the channel open) — chrome.tabs.captureVisibleTab → fetch(dataURL) → createImageBitmap → if width > 1280 px, OffscreenCanvas downsample + FileReader.readAsDataURL → returns {kind:'capture-screenshot', screenshot_b64, captured_at}. Errors map to {kind:'error', reason:'screenshot_failed', detail}. src/lib/capture/dom-serialize.ts uses cloneNode(true) + TreeWalker(SHOW_ELEMENT) to detach SCRIPT/STYLE/NOSCRIPT and aria-hidden=\"true\" subtrees, then returns innerHTML. src/lib/capture/payload.ts caps the JSON-serialized UTF-8 payload at 1_000_000 bytes — over the cap, html is dropped (screenshot retained as primary signal). src/content/capture.ts orchestrates: sendMessage → screenshot from SW + serialize DOM locally → compose {screenshot_b64, html, page_url, page_title, captured_at} → applyPayloadSizeCap. FloatingButton click handler uses requestCapture and logs a payload summary at debug level (full LLM pipeline lands in US-008..US-011). manifest.host_permissions adds <all_urls> (required for captureVisibleTab on arbitrary tabs; activeTab cannot be granted via content-script gestures). Build emits dist/assets/service-worker.ts-*.js (1.60 KB) with captureVisibleTab + OffscreenCanvas + createImageBitmap + FileReader + capture-screenshot/screenshot_failed kinds; dist/assets/inject.tsx-*.js (14.45 KB) with cloneNode + TreeWalker + SCRIPT/STYLE/NOSCRIPT/aria-hidden filters + 1_000_000 cap + TextEncoder. 33/33 programmatic AC checks PASS (manifest/SW/content bundle structural greps + payload-size-cap pure-logic round-trip in node); no eval / new Function / inline scripts in dist; §6.4 forbidden-copy grep over the new src files clean. Typecheck clean."
     },
     {
       "id": "US-006",

@@ -1,6 +1,7 @@
 // MV3 service worker entry. The SW is killed between events — never hold
 // long-lived in-memory state. All message handlers must be self-contained.
 
+import { captureAndDownsample } from '@/lib/capture/screenshot';
 import {
   isClipcvMessage,
   type ClipcvResponse,
@@ -21,19 +22,41 @@ chrome.runtime.onSuspend.addListener(() => {
   console.debug('[clipcv] onSuspend');
 });
 
-chrome.runtime.onMessage.addListener((rawMessage: unknown, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((rawMessage: unknown, sender, sendResponse) => {
   if (!isClipcvMessage(rawMessage)) {
     const response: ClipcvResponse = { kind: 'error', reason: 'unknown_kind' };
     sendResponse(response);
     return false;
   }
-
-  // capture-request: full pipeline lands in US-005+. For now ack so the
-  // content script can confirm the round-trip works.
   console.debug('[clipcv] capture-request', rawMessage.url);
-  const ack: ClipcvResponse = { kind: 'capture-request-ack', receivedAt: new Date().toISOString() };
-  sendResponse(ack);
-  return false;
+  void handleCaptureRequest(sender, sendResponse);
+  // Returning true keeps the message channel open across the async boundary
+  // until handleCaptureRequest resolves and calls sendResponse.
+  return true;
 });
+
+async function handleCaptureRequest(
+  sender: chrome.runtime.MessageSender,
+  sendResponse: (response: ClipcvResponse) => void,
+): Promise<void> {
+  try {
+    const windowId = sender.tab?.windowId;
+    const screenshotB64 = await captureAndDownsample(windowId);
+    const response: ClipcvResponse = {
+      kind: 'capture-screenshot',
+      screenshot_b64: screenshotB64,
+      captured_at: new Date().toISOString(),
+    };
+    sendResponse(response);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    const response: ClipcvResponse = {
+      kind: 'error',
+      reason: 'screenshot_failed',
+      detail,
+    };
+    sendResponse(response);
+  }
+}
 
 export {};

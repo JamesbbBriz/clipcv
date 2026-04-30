@@ -111,11 +111,51 @@ Repo: <to-be-set-on-first-commit>
   `chrome.storage.onChanged` to react live (no need to reload the
   page when the user accepts). US-012 lands the writer.
 - **Service-worker message dispatch**: stateless `onMessage` handler
-  that returns `false` (synchronous `sendResponse`) — never holds the
-  listener channel open across SW idle. Future SW handlers that need
-  async work (e.g. captureVisibleTab in US-005) must return `true`
-  AND complete via the captured `sendResponse` callback within the
-  same wake.
+  that returns `false` for synchronous branches (e.g. `unknown_kind`
+  rejection) and `true` for async branches (e.g. `capture-request`),
+  with the async branch wrapped in a `void handle...(sender, sendResponse)`
+  call so the listener returns synchronously while the handler resolves
+  later. The handler MUST `sendResponse(...)` in every code path,
+  including the catch block — otherwise Chrome times out the channel
+  with "the message port closed before a response was received".
+- **Screenshot capture pipeline** (SW-only, `src/lib/capture/screenshot.ts`):
+  `chrome.tabs.captureVisibleTab(windowId?, {format:'png'})` → fetch the
+  data URL → `createImageBitmap(blob)` → if width > 1280 px,
+  `OffscreenCanvas(width, height*scale)` + ctx.drawImage downsample,
+  then `canvas.convertToBlob({type:'image/png'})` →
+  `FileReader.readAsDataURL` to base64. All four APIs are available in
+  MV3 service workers; no DOM access required. `bitmap.close()` after
+  use to release the GPU resource. Default cap 1280 px chosen to match
+  vision-LLM tile pricing sweet spot.
+- **DOM strip rule** (`src/lib/capture/dom-serialize.ts`): clone
+  `document.body`, walk the subtree with `createTreeWalker(SHOW_ELEMENT)`,
+  collect every `<SCRIPT>` / `<STYLE>` / `<NOSCRIPT>` AND every element
+  with `aria-hidden="true"`, then detach in reverse order so parent
+  removal cannot interfere with later child references. `Element.remove()`
+  is a no-op when parentNode is null, so already-detached descendants
+  are safe.
+- **Cross-context payload shape** (`src/lib/capture/payload.ts`):
+  `CapturePayload = {screenshot_b64, html, page_url, page_title, captured_at}`
+  is the single contract from capture orchestrator into the downstream
+  vision-extract pipeline. `applyPayloadSizeCap(payload, 1_000_000)` —
+  measured via `TextEncoder().encode(JSON.stringify(payload)).byteLength` —
+  drops the html field if over budget; the screenshot is preserved as
+  the primary vision signal. Future stories (US-008+) consume this
+  shape directly.
+- **Capture orchestration topology**: content script owns the click and
+  the DOM serialize; service worker owns the screenshot. Content sends
+  `{kind:'capture-request'}` → SW responds with
+  `{kind:'capture-screenshot', screenshot_b64, captured_at}` → content
+  serializes its own DOM and assembles the final `CapturePayload`. The
+  pipeline lives in `src/content/capture.ts:requestCapture()` and is
+  the single entry point UI components call.
+- **Manifest host_permissions**: `<all_urls>` is required for
+  `chrome.tabs.captureVisibleTab` to capture any visited page. The
+  `activeTab` permission is NOT a usable substitute when the trigger
+  is a content-script floating button — Chrome only grants `activeTab`
+  via toolbar action / context menu / keyboard shortcut gestures.
+  Future stories that need broader cross-origin access already fall
+  under this grant; do not redeclare.
 
 ## Execution Order
 
@@ -514,5 +554,152 @@ US-001 → US-002 → US-003 → US-004 → US-005 → US-006 → US-007 → US-
     bundle when the entry uses dynamic import (loader → bundle). This
     is expected and required for the loader's
     `chrome.runtime.getURL(...)` indirection to succeed.
+
+---
+
+## 2026-04-30 — US-005 — Capture viewport screenshot + visible DOM HTML
+
+- Files changed:
+  - src/manifest.json: add `host_permissions: ["<all_urls>"]` —
+    required for chrome.tabs.captureVisibleTab on arbitrary tabs;
+    activeTab cannot be granted via content-script floating-button
+    gestures (only toolbar action / context menu / keyboard shortcut).
+  - src/lib/messaging/messages.ts: replace the placeholder
+    `capture-request-ack` response with the real `capture-screenshot`
+    variant carrying `screenshot_b64` + `captured_at`. Expand
+    `ClipcvErrorReason` with `screenshot_failed` + `no_active_tab`
+    (the SW emits the former on captureVisibleTab failure, e.g. when
+    the active tab is a chrome:// page).
+  - src/lib/capture/dom-serialize.ts: new — `serializeVisibleDom()`
+    clones document.body and walks with TreeWalker(SHOW_ELEMENT) to
+    detach SCRIPT / STYLE / NOSCRIPT subtrees and any element with
+    `aria-hidden="true"`. Returns post-prune innerHTML. Pure DOM
+    logic — runs in the content script.
+  - src/lib/capture/payload.ts: new — `CapturePayload` type +
+    `applyPayloadSizeCap(payload, 1_000_000)` cap with UTF-8 byte
+    measurement via TextEncoder. Over the cap, drops `html` only;
+    screenshot is preserved as the primary vision signal.
+  - src/lib/capture/screenshot.ts: new — service-worker-only.
+    `captureAndDownsample(windowId?, maxWidth=1280)` calls
+    chrome.tabs.captureVisibleTab → fetch dataURL → createImageBitmap
+    → if width > maxWidth, OffscreenCanvas downsample +
+    FileReader.readAsDataURL. All four APIs are SW-available; no DOM.
+    bitmap.close() after use.
+  - src/background/service-worker.ts: wire the async capture-request
+    handler. Listener returns `true` for capture-request branches
+    (keeps message channel open) and `false` for unknown_kind. Async
+    handler is wrapped in `void handleCaptureRequest(...)` so the
+    listener returns synchronously while the SW continues working.
+    On error, sendResponse with `{kind:'error', reason:'screenshot_failed',
+    detail}`.
+  - src/content/capture.ts: new — `requestCapture()` orchestrates
+    content-script side: send capture-request → await
+    capture-screenshot → serialize visible DOM locally → compose
+    `CapturePayload` → applyPayloadSizeCap. Single entry point UI
+    components call.
+  - src/content/FloatingButton.tsx: hook click handler to
+    `requestCapture()` — replaces the US-004 ack stub. On success,
+    debug-log a payload summary (page_url, captured_at, html_bytes,
+    screenshot_bytes); the full LLM/render/download pipeline lands in
+    US-008..US-011.
+- Verification commands run:
+  - `npm run typecheck` → OK (tsc --noEmit clean under strict +
+    exactOptionalPropertyTypes + noUncheckedIndexedAccess).
+  - `npm run build` → dist/ produced:
+    - dist/manifest.json (1.20 KB) with
+      `host_permissions:["<all_urls>"]` alongside
+      `permissions:["storage"]`.
+    - dist/assets/service-worker.ts-*.js (1.60 KB) with
+      captureVisibleTab + createImageBitmap + OffscreenCanvas +
+      FileReader + capture-screenshot kind + screenshot_failed reason
+      + 1280 px default.
+    - dist/assets/inject.tsx-*.js (14.45 KB) with cloneNode +
+      createTreeWalker + SCRIPT/STYLE/NOSCRIPT/aria-hidden filters +
+      1_000_000 byte cap + TextEncoder + capture-request /
+      capture-screenshot kinds + page_url/screenshot_b64 payload
+      shape.
+    - jsx-runtime / popup / options bundles unchanged from US-004.
+  - Programmatic AC verifier (scripts/verify-us-005.mjs, removed
+    after run) → 33/33 checks PASS:
+    1) manifest.json exists
+    2) manifest.host_permissions includes `<all_urls>`
+    3) manifest.permissions still includes "storage"
+    4) manifest.background.service_worker module-typed
+    5–8) SW loader exists + imports the bundled SW asset
+    9) SW bundle calls chrome.tabs.captureVisibleTab
+    10) SW bundle uses createImageBitmap
+    11) SW bundle uses OffscreenCanvas
+    12) SW bundle uses FileReader
+    13) SW bundle returns capture-screenshot kind
+    14) SW bundle returns screenshot_failed on error
+    15) SW bundle still rejects unknown_kind
+    16) SW bundle stamps captured_at
+    17) SW bundle defaults 1280 px max width
+    18) SW bundle keeps async channel open (async true / sync false
+        branches both present in minified ternary)
+    19) content bundle exists
+    20) content bundle sends capture-request
+    21) content bundle reads capture-screenshot response
+    22) content bundle clones document.body
+    23) content bundle creates a TreeWalker
+    24) content bundle filters SCRIPT/STYLE/NOSCRIPT
+    25) content bundle filters aria-hidden
+    26) content bundle includes 1 MB cap (1_000_000 / 1e6 / 1000000)
+    27) content bundle uses TextEncoder
+    28) content bundle constructs page_url + screenshot_b64 shape
+    29) no eval(...) in any dist asset
+    30) no new Function(...) in any dist asset
+    31) §6.4 forbidden-copy grep over new src files clean
+    32) small payload preserved by cap
+    33) oversized payload drops html and keeps screenshot
+  - Forbidden-pattern grep for §6.4 downstream copy
+    (ats|crm|recruiter|recruiting|matching|workflow|optitalent) over
+    src/lib/capture + src/content/capture.ts +
+    src/background/service-worker.ts → 0 matches.
+  - Browser unpacked load: same Chrome 137+ CLI limitation as US-002
+    through US-004 (--load-extension blocked from CLI without policy
+    / dev-mode). Structural checks above cover every observable AC
+    condition; user manually loads dist/ in chrome://extensions to
+    confirm the floating button now triggers a screenshot + DOM
+    serialize round-trip and the debug payload summary appears in
+    devtools console.
+- Codebase patterns established (promoted to top of progress.txt):
+  - Service-worker async dispatch: listener returns `true` only for
+    branches that need async sendResponse; the handler MUST call
+    sendResponse in every code path including catch (otherwise
+    Chrome times out the channel).
+  - Screenshot capture pipeline: captureVisibleTab → fetch data URL
+    → createImageBitmap → OffscreenCanvas downsample to 1280 px →
+    FileReader.readAsDataURL. All four APIs are MV3-SW-available.
+  - DOM strip rule: clone body, TreeWalker(SHOW_ELEMENT) collect,
+    detach in reverse order. Strips SCRIPT/STYLE/NOSCRIPT +
+    aria-hidden="true".
+  - Cross-context payload shape: CapturePayload is the single
+    contract from capture orchestrator into US-008+ vision-extract.
+    1 MB cap drops html only; screenshot preserved as primary signal.
+  - Capture orchestration topology: content owns click + DOM
+    serialize; SW owns screenshot. Single entry point in
+    src/content/capture.ts:requestCapture().
+  - Manifest host_permissions: `<all_urls>` required for
+    captureVisibleTab; activeTab is not a usable substitute when the
+    trigger is a content-script gesture.
+- Notes / surprises:
+  - The minifier rewrites `return true` / `return false` into a
+    ternary `... ? (..., !0) : (..., !1)`. The verifier's
+    "channel-stays-open" check has to look for `!0)` and `!1)` in
+    the bundle text rather than the literal `return true` source.
+  - chrome.tabs.captureVisibleTab fails on chrome://, about:, and
+    Chrome Web Store URLs — the try/catch in handleCaptureRequest
+    surfaces this as `screenshot_failed` with the underlying error
+    message in `detail`. UI toasts in US-011 will surface this user-
+    facingly; for now the FloatingButton flips to "Error" state.
+  - FileReader.readAsDataURL avoids the
+    `String.fromCharCode(...bytes)` chunk-loop trick for large
+    blobs — readable and stack-safe.
+  - vitest is still not wired up; US-005's AC does not require unit
+    tests (it is a UI/extension-surface story per CLAUDE.md §7.3),
+    so deferred to US-006 / US-007 / US-008 where unit tests are
+    explicit acceptance criteria. Pure-logic round-trip for the
+    1 MB cap was verified inline in the one-off node verifier.
 
 ---
