@@ -134,8 +134,8 @@
         "Typecheck passes"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Schema lives in src/lib/schema/profile.ts as ExtractedProfileSchema (top-level z.strictObject — rejects unknown keys), with name as the sole required field. Optional primitives (email/phone/current_title/current_company/location/summary) use z.string().min(1).optional(); arrays (experiences/educations/skills/certifications/languages) use .default([]) so the model may omit them and still produce a valid output with empty arrays. ExperienceItemSchema requires {company, title} + optional {start_date, end_date, location} (free-form strings, no normalization) + bullets:string[].default([]); EducationItemSchema requires {institution} + optional {degree, field, start_date, end_date, location}. Exports ExtractedProfile = z.infer<typeof ExtractedProfileSchema> plus ExperienceItem / EducationItem types for downstream renderers (US-009/US-010). Tests in src/lib/schema/__tests__/profile.test.ts cover golden-fixture parse, minimal-name-only parse with array defaults, missing-name rejection, unknown-top-level-key rejection (asserts the zod 4 'unrecognized_keys' issue.keys array contains the offending field), nested-required-field rejection on experiences[*].company/title, empty-string name rejection, free-form date round-trip, and bullets[]-default omission. `npm run typecheck` clean, `npm test` 21 passed (8 new + 13 existing LLM-client), `npm run build` produced dist/ — schema not yet wired into any entry (the extract pipeline binds to it in US-008). Note: zod 4 strict-mode rejection surfaces as code:'unrecognized_keys' with empty path[] and a keys[] array, NOT a path-targeted issue — different from zod 3."
     },
     {
       "id": "US-008",

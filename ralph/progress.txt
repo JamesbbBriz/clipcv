@@ -189,6 +189,28 @@ Repo: <to-be-set-on-first-commit>
   message is scrubbed via `scrubSecrets()` BEFORE construction (so
   it's safe to surface in toasts / logs). Stories that introduce new
   provider-error display surfaces MUST keep this invariant.
+- **Zod schema location** (`src/lib/schema/`): single source of truth
+  for the LLM contract. Top-level uses `z.strictObject(...)` so the
+  model cannot smuggle unknown fields past parse; nested item schemas
+  (`ExperienceItemSchema`, `EducationItemSchema`) use plain
+  `z.object(...)` (zod 4 default = strip unknowns) so a hallucinated
+  extra field on a single experience entry does NOT poison the entire
+  parse. Optional primitives are `z.string().min(1).optional()`
+  (rejects empty strings), required-with-default arrays are
+  `z.array(...).default([])` (model may omit; output is always a
+  concrete array, no null-checks downstream).
+- **Zod 4 unknown-key error shape**: strict-object rejection emits
+  `{code:'unrecognized_keys', path:[], keys:[...]}` — the unknown
+  field name lives in `issue.keys`, NOT `issue.path`. zod 3 used a
+  path-targeted error; tests written against zod 3 idioms break here.
+  When asserting "key X was rejected", look in `keys`.
+- **`exactOptionalPropertyTypes` + zod**: `.optional()` produces a
+  `key?: T | undefined` field. With `exactOptionalPropertyTypes: true`
+  callers cannot pass `field: undefined` explicitly but can omit the
+  key — fine for parse output (the parse step never emits explicit
+  undefined values) and fine for upstream code that conditionally
+  spreads. No special handling needed beyond avoiding `field:
+  undefined` literals.
 
 ## Execution Order
 
@@ -845,5 +867,68 @@ US-001 → US-002 → US-003 → US-004 → US-005 → US-006 → US-007 → US-
     will compose `prompt` + the JSON-schema instruction text and pass
     them as a single `prompt` argument; the adapter's text/html
     concatenation stays untouched.
+
+---
+
+## 2026-04-30 — US-007 — Zod schema for ExtractedProfile
+
+- Files changed:
+  - src/lib/schema/profile.ts: new — `ExtractedProfileSchema`
+    (`z.strictObject` — rejects unknown top-level keys), nested
+    `ExperienceItemSchema` + `EducationItemSchema` (default `z.object`
+    — strip behaviour for nested unknowns). Top-level fields:
+    `name` (required, NonEmptyString) + optional primitives + arrays
+    with `.default([])`. Free-form date strings (per AC: "model
+    returns whatever the page shows; we do not normalize"). Re-exports
+    `ExtractedProfile` / `ExperienceItem` / `EducationItem` types via
+    `z.infer<typeof ...>`.
+  - src/lib/schema/__tests__/profile.test.ts: new — 8 specs covering
+    golden-fixture parse, minimal-name-only parse with all arrays
+    defaulting to [], missing-name rejection, unknown-top-level-key
+    rejection (asserts the zod 4 `unrecognized_keys` issue.keys
+    array contains the offending field), nested-required-field
+    rejection on experiences[*].company/title, empty-string name
+    rejection (NonEmptyString invariant), free-form date round-trip,
+    and bullets default-to-[] when omitted from an experience item.
+- Verification commands run:
+  - `npm run typecheck` → OK (tsc --noEmit clean)
+  - `npm test` → 21 tests passed across 2 files (8 new schema specs +
+    13 existing LLM-client specs from US-006); zero failures.
+  - `npm run build` → dist/ produced (manifest.json + popup.html +
+    options.html + service-worker.ts-*.js + inject.tsx-*.js + assets);
+    schema not bundled into any entry yet — consumers (US-008
+    extract pipeline, US-009 PDF, US-010 DOCX) wire it in their own
+    stories.
+  - Forbidden-pattern grep over `src/lib/schema/`: no `eval(`, no
+    `new Function`, no `<script` — MV3 §6.1 compliant.
+  - §6.4 forbidden-copy grep over `src/lib/schema/`: only false-
+    positive substring is "ats" inside "treats" (test description
+    "treats date fields as free-form strings"); no downstream-
+    direction language anywhere in the new files.
+- Codebase patterns established (promoted to top of progress.txt):
+  - Zod schema location convention (`src/lib/schema/`).
+  - Zod 4 unknown-key error shape: `code:'unrecognized_keys'` + empty
+    `path[]` + populated `keys[]`. Tests written against zod 3 idioms
+    break.
+  - `exactOptionalPropertyTypes` + zod compatibility note.
+- Notes / surprises:
+  - First test draft asserted `issue.path.includes('injected_field')`
+    — a zod 3 idiom. zod 4 puts the offending key name in
+    `issue.keys` and leaves `issue.path` empty for the strict-object
+    rejection. Adjusted the test to look up the
+    `unrecognized_keys`-coded issue and assert its `keys` array.
+    Captured as a codebase pattern above so future stories that
+    extend the schema do not hit the same trap.
+  - Used `z.strictObject` only at the top level. Nested item
+    schemas stay default (strip-unknown) so the model adding a single
+    extra field on one experience entry does not poison the entire
+    parse — the AC only requires "rejects unknown top-level keys".
+    Smaller blast radius for hallucinated extra fields.
+  - Arrays use `.default([])` so the model may omit them entirely;
+    the parse output is always a concrete array, removing
+    null-checks from US-009/US-010 renderers.
+  - The schema file lives entirely outside any chrome.* / DOM API,
+    same as `src/lib/llm/`, so it parses fine in the vitest node
+    environment without DOM polyfills.
 
 ---
