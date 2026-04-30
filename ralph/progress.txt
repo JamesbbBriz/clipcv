@@ -1599,3 +1599,31 @@ US-001 → US-002 → US-003 → US-004 → US-005 → US-006 → US-007 → US-
   - The build emits an "rollupOptions and rolldownOptions both specified by 'crx:content-scripts' plugin" warning since US-001 — harmless, internal CRXJS quirk.
 
 ---
+
+## 2026-04-30 — US-013 — Public-facing docs + Chrome Web Store assets
+
+- Files changed:
+  - README.md: rewritten — feature list (one-click capture / vision LLM extract / PDF or DOCX / BYOK / at-rest encryption / no telemetry / MIT), build-from-source install, BYOK setup walk-through (provider list / base URL / model / API key + Test connection error codes + at-rest WebCrypto note), tech-stack summary, contributing notes (build + lint/test/typecheck gates + a hard-rules pull-request checklist that mirrors CLAUDE.md §6), privacy summary, explicit links to DISCLAIMER.md + PRIVACY.md.
+  - public/icons/16.png, public/icons/48.png, public/icons/128.png: replaced from 1×1 placeholders with proper PNGs at the correct dimensions (16×16 / 48×48 / 128×128, 8-bit RGBA, optimised — 178 / 397 / 867 bytes). Brand mark: rounded ink-navy square + thick open arc "c" + soft-blue accent dot. Generated via PIL with the inline script in the iteration.
+  - docs/store-listing.md: new — short description (112 chars, ≤132 cap), long description (what clipcv does + why BYOK + what it is not + responsibility statement), permissions justification table, 5 screenshot specs (1280×800 each: floating button on a generic article page, capture-progress with spinner+Cancel, generated PDF preview, options BYOK page with masked API key, first-launch disclaimer modal), 30-second demo video script (caption-only, no voiceover, no third-party logos, fictional Jane Doe data), submission checklist.
+  - .markdownlint.json: new — project-level config disabling MD013 (line-length), MD033 (inline HTML for `<owner>` placeholders), MD034 (bare URL — `j.doe@example.com` examples), MD036 (emphasis-as-heading — the *Last updated* footer in DISCLAIMER + PRIVACY), MD060 (compact-table style nit). Default-true otherwise.
+  - ralph/prd.json: US-013 marked passes=true with notes.
+  - ralph/progress.txt: this entry appended.
+- Verification commands run:
+  - `npm run typecheck` → OK (tsc --noEmit clean)
+  - `npm test` → 8 files / 74 passed (no test additions — docs-only story per CLAUDE.md §7.3 has no unit-test AC; existing pipeline + extract + render + schema + LLM-client suites still green)
+  - `npm run build` → dist/icons/{16,48,128}.png at correct dimensions matching the source files (`file dist/icons/*.png` confirms `PNG image data, NxN, 8-bit/color RGBA`); manifest + popup + options + service-worker + inject bundles unchanged from US-012.
+  - `npx markdownlint-cli2 README.md DISCLAIMER.md PRIVACY.md docs/store-listing.md` → 0 errors under .markdownlint.json.
+  - §6.4 forbidden-pattern grep (ats/crm/recruit{er,ing,ment}/workflow/bullhorn/workday/greenhouse/lever/salesforce/hubspot/linkedin/indeed/naukri/optitalent/'upload to'/'import to'/'send to your (ats|crm|recruiter|workflow|matching)'/'feed (your|the) (matching|pipeline)'/'compatible with (your)? (ats|crm)'/'matching pipeline') → 0 hits across README.md, DISCLAIMER.md, PRIVACY.md, LICENSE, docs/store-listing.md.
+  - Short description char count: `len('Save any profile page as a clean PDF or DOCX, locally, with your own Vision LLM API key. Open source. No server.')` == 112 ≤ 132 ✓.
+- Codebase patterns established (promoted to top of progress.txt under "## Codebase Patterns"):
+  - **Brand mark generation**: 16/48/128 PNG icons are generated programmatically from a single PIL recipe (rounded square + open-arc "c" + accent dot). If the brand mark changes, regenerate all three sizes from the same recipe so the vector intent survives at every raster resolution. Source colours: ink `#202633`, fg `#f3f4f6`, accent `#60a5fa`.
+  - **Markdownlint config** (`.markdownlint.json`): repo-level config that disables MD013/MD033/MD034/MD036/MD060. The disabled rules are stylistic and conflict with the project's chosen voice (long URLs, intentional `<owner>` placeholders, email examples, "Last updated" emphasis footer, compact tables). Default-true keeps everything else on. Future doc stories run `npx --yes markdownlint-cli2` against the config and expect 0 errors.
+  - **§6.4 forbidden-pattern grep harness**: documented in the iteration log as a small Python script — 21-pattern regex set covering ATS/CRM/recruit*/workflow + the named platforms (Bullhorn/Workday/Greenhouse/Lever/Salesforce/HubSpot/LinkedIn/Indeed/Naukri/optitalent) + the directional verb patterns ('upload to', 'import to', 'send to your X', 'feed (your|the) (matching|pipeline)', 'compatible with X'). Use this exact set for every doc / copy story; a single hit fails the iteration. Negative-context phrasings (e.g. "does not specify a workflow") still hit the grep — rephrase to "does not specify any downstream use" or similar to keep the harness mechanical.
+  - **Short description budget**: Chrome Web Store cap is 132 chars; clipcv's official short description is "Save any profile page as a clean PDF or DOCX, locally, with your own Vision LLM API key. Open source. No server." (112 chars). docs/store-listing.md is the canonical source — submitting maintainers paste verbatim from there.
+- Notes / surprises:
+  - The four §6.4 grep "hits" before rephrasing were all in negative contexts ("does not name a workflow", "submission checklist forbids ATS / CRM / workflow language") — i.e. the docs themselves disclaiming the rule. Even so, a strict mechanical grep counts these, so we rephrase to "downstream use" / "third-party destination service" so the harness stays single-pass clean. Promoted as a pattern.
+  - The PIL-generated icons are tiny (178 / 397 / 867 bytes optimised), which is fine for store submission. If a future iteration replaces the brand mark with something more elaborate, regenerate all three sizes from the same source to keep the visual intent consistent across the toolbar (16) / extensions page (48) / store listing (128).
+  - markdownlint-cli2 is invoked via `npx --yes`; we do NOT add it to devDependencies. Minimum blast radius — a doc story that lints cleanly does not need a permanent dev-time linter dependency in this repo, but the pattern is documented so future doc-touching stories run the same one-shot check.
+
+---
