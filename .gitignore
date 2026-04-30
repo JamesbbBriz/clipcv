@@ -36,3 +36,6 @@ coverage/
 # Vite + CRXJS cache
 .vite/
 .crx-cache/
+
+# Ralph runner working state (runner-internal, not story artifacts)
+scripts/ralph/progress.txt
