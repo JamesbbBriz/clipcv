@@ -1,14 +1,52 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { isDisclaimerAccepted } from '@/lib/storage/disclaimer-store';
+import {
+  PipelineError,
+  runPipeline,
+  type PipelineStage,
+} from '@/lib/pipeline/run-pipeline';
+import { pipelineUserMessage } from '@/lib/pipeline/user-messages';
 import { requestCapture } from './capture';
 
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 
-type SendState = 'idle' | 'sending' | 'sent' | 'error';
+type Phase = 'idle' | 'capturing' | PipelineStage;
+type ToastKind = 'success' | 'error';
+interface Toast {
+  kind: ToastKind;
+  text: string;
+}
+
+const ACTIVE_PHASES: ReadonlySet<Phase> = new Set([
+  'capturing',
+  'extracting',
+  'rendering',
+  'downloading',
+]);
+const TOAST_AUTO_DISMISS_MS = 4000;
+
+function phaseLabel(phase: Phase): string {
+  switch (phase) {
+    case 'capturing':
+      return 'Capturing…';
+    case 'extracting':
+      return 'Reading page…';
+    case 'rendering':
+      return 'Building file…';
+    case 'downloading':
+      return 'Saving…';
+    case 'done':
+    case 'idle':
+      return 'Capture this page';
+  }
+}
 
 export function FloatingButton(): JSX.Element | null {
   const [accepted, setAccepted] = useState<boolean | null>(null);
-  const [sendState, setSendState] = useState<SendState>('idle');
+  const [phase, setPhase] = useState<Phase>('idle');
+  const [toast, setToast] = useState<Toast | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -30,53 +68,118 @@ export function FloatingButton(): JSX.Element | null {
     return () => {
       cancelled = true;
       chrome.storage.onChanged.removeListener(onChange);
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
     };
   }, []);
 
   if (accepted !== true) return null;
 
+  function showToast(next: Toast): void {
+    setToast(next);
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, TOAST_AUTO_DISMISS_MS);
+  }
+
   async function handleClick(): Promise<void> {
-    setSendState('sending');
+    if (ACTIVE_PHASES.has(phase)) return;
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    setPhase('capturing');
+    setToast(null);
     try {
       const payload = await requestCapture();
-      // Full pipeline (LLM extraction, render, download) lands in US-008..US-011.
-      // For US-005 the visible signal of success is the captured payload — log
-      // a small summary so the developer can confirm the round-trip works.
-      console.debug('[clipcv] captured', {
-        page_url: payload.page_url,
-        page_title: payload.page_title,
-        captured_at: payload.captured_at,
-        html_bytes: payload.html.length,
-        screenshot_bytes: payload.screenshot_b64.length,
+      if (ctrl.signal.aborted) {
+        showToast({ kind: 'error', text: pipelineUserMessage('CANCELLED') });
+        return;
+      }
+      const result = await runPipeline({
+        payload,
+        signal: ctrl.signal,
+        onStage: (s) => setPhase(s),
       });
-      setSendState('sent');
+      const count = result.filenames.length;
+      showToast({
+        kind: 'success',
+        text:
+          count === 1
+            ? `Saved ${result.filenames[0] ?? 'file'}.`
+            : `Saved ${count} files.`,
+      });
     } catch (err) {
-      console.debug('[clipcv] capture error', err);
-      setSendState('error');
+      const code =
+        err instanceof PipelineError
+          ? err.code
+          : err instanceof Error && err.message.toLowerCase().includes('cancel')
+            ? 'CANCELLED'
+            : 'UNKNOWN_LLM';
+      showToast({ kind: 'error', text: pipelineUserMessage(code) });
     } finally {
-      window.setTimeout(() => setSendState('idle'), 1500);
+      abortRef.current = null;
+      setPhase('idle');
     }
   }
 
-  const label =
-    sendState === 'sending'
-      ? 'Capturing…'
-      : sendState === 'sent'
-        ? 'Sent'
-        : sendState === 'error'
-          ? 'Error'
-          : 'Capture this page';
+  function handleCancel(): void {
+    abortRef.current?.abort();
+  }
+
+  const isActive = ACTIVE_PHASES.has(phase);
+  const label = phaseLabel(phase);
 
   return (
-    <button
-      type="button"
-      onClick={() => void handleClick()}
-      aria-label="Capture this page with clipcv"
-      className="fixed right-4 bottom-4 z-[2147483647] inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-900 shadow-lg hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-      disabled={sendState === 'sending'}
-    >
-      <span aria-hidden="true" className="inline-block h-2 w-2 rounded-full bg-slate-900" />
-      {label}
-    </button>
+    <div className="fixed right-4 bottom-4 z-[2147483647] flex flex-col items-end gap-2">
+      {toast && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={
+            toast.kind === 'success'
+              ? 'max-w-xs rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900 shadow-lg'
+              : 'max-w-xs rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-900 shadow-lg'
+          }
+        >
+          {toast.text}
+        </div>
+      )}
+      <div className="flex items-center gap-2">
+        {isActive && (
+          <button
+            type="button"
+            onClick={handleCancel}
+            aria-label="Cancel capture"
+            className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-md hover:bg-slate-50"
+          >
+            Cancel
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => void handleClick()}
+          aria-label="Capture this page with clipcv"
+          className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-900 shadow-lg hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={isActive}
+        >
+          {isActive ? (
+            <span
+              aria-hidden="true"
+              className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-slate-300 border-t-slate-900"
+            />
+          ) : (
+            <span
+              aria-hidden="true"
+              className="inline-block h-2 w-2 rounded-full bg-slate-900"
+            />
+          )}
+          {label}
+        </button>
+      </div>
+    </div>
   );
 }

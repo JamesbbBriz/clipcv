@@ -23,7 +23,7 @@
     "type": "module"
   },
   "options_page": "src/options/options.html",
-  "permissions": ["storage"],
+  "permissions": ["storage", "downloads"],
   "host_permissions": ["<all_urls>"],
   "content_scripts": [
     {

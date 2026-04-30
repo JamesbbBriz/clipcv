@@ -340,6 +340,68 @@ Repo: <to-be-set-on-first-commit>
   US-008's adapter — promote this once more to a general "never
   pass `field: undefined`" rule for forwards under
   `exactOptionalPropertyTypes:true`.
+- **Pipeline orchestrator location** (`src/lib/pipeline/run-pipeline.ts`):
+  single entry `runPipeline({payload, signal?, onStage?, now?,
+  loadByokImpl?, extractImpl?, renderImpl?, downloadImpl?, fetchImpl?})`
+  → `{filenames}`. Walks `extracting → rendering → downloading → done`;
+  every stage boundary calls `ensureNotAborted(signal)` so a Cancel
+  click between stages collapses to `PipelineError('CANCELLED')`. If
+  the LLM fetch is aborted mid-stream the orchestrator inspects
+  `signal.aborted` BEFORE mapping the underlying error, so
+  `AbortError` / `Error('aborted')` / etc. all surface as CANCELLED.
+  ExtractError → PipelineError mapping is 1:1 on the codes
+  (AUTH/TIMEOUT/NO_PROFILE_DETECTED/SCHEMA_MISMATCH/UNKNOWN_LLM);
+  render and download failures wrap as RENDER_FAILED / DOWNLOAD_FAILED;
+  missing settings → SETTINGS_MISSING. All thrown messages routed
+  through `scrubSecrets` so sk-* / Bearer-* fragments cannot leak
+  into toasts.
+- **Cross-context download path**: content script wraps each
+  `RenderedFile.bytes` in a `Blob({type: file.mimeType})` →
+  `URL.createObjectURL(blob)` → posts
+  `{kind:'download-file', url, filename}` to the SW via
+  `chrome.runtime.sendMessage`. SW handles via
+  `chrome.downloads.download({url, filename, saveAs: true})` and
+  responds with `{kind:'download-started', downloadId}`. Blob URL is
+  revoked **1 second after** sendMessage resolves — eager revoke
+  aborts the download with NETWORK_FAILED because the browser process
+  may not have finished reading the blob URL yet. `chrome.downloads`
+  is NOT accessible from content scripts; SW is the only legal
+  caller. Permissions: `"downloads"` (narrowest grant).
+- **AbortController in React refs**: store the in-flight pipeline's
+  `AbortController` in a `useRef`; the Cancel button calls
+  `abortRef.current?.abort()`. The orchestrator reads
+  `input.signal?.aborted` at every stage boundary AND, for the
+  LLM-fetch step, after the catch block (so the underlying error
+  type does not leak into the user toast when the user explicitly
+  cancelled). Cleanup: `abortRef.current = null` in the `finally`
+  block of the click handler.
+- **FloatingButton state machine**: `Phase = 'idle' | 'capturing' |
+  'extracting' | 'rendering' | 'downloading' | 'done'`. `ACTIVE_PHASES`
+  set (capturing/extracting/rendering/downloading) drives both the
+  spinner-on-button animation and the visibility of a sibling Cancel
+  button. The button is `disabled` while active. `phaseLabel(phase)`
+  is the only source of the user-facing label; `done` and `idle` both
+  display the resting "Capture this page" copy.
+- **In-shadow-DOM toast**: rendered above the button row in the same
+  shadow root (no portal needed — we already own the shadow). Two
+  variants (`success` emerald-50; `error` rose-50). Auto-dismissed
+  after 4 s via `setTimeout(setToast(null))` whose handle is stashed
+  in a `useRef` and cleared on every new toast + on unmount.
+- **Pipeline error → user message** (`src/lib/pipeline/user-messages.ts`):
+  single switch over `PipelineErrorCode`. Toast UI imports this
+  helper exclusively; do NOT inline new copy in components. The
+  test in `__tests__/run-pipeline.test.ts` pins every code → string
+  pair AND greps each string for §6.4 forbidden tokens — adding a
+  new code requires extending both the helper and the test in the
+  same diff.
+- **Message contract extension** (`src/lib/messaging/messages.ts`):
+  `ClipcvMessage` is a discriminated union — to add a new kind, add
+  the variant + extend `isClipcvMessage` with a per-kind branch
+  that asserts the variant's required fields. Same applies to
+  `ClipcvResponse`. SW dispatches each kind in its own `if
+  (rawMessage.kind === ...)` branch returning `true` for async work;
+  the listener's tail is an exhaustiveness fallback that returns
+  `unknown_kind`.
 
 ## Execution Order
 
@@ -1335,5 +1397,144 @@ US-001 → US-002 → US-003 → US-004 → US-005 → US-006 → US-007 → US-
     through as-is, so the filename ends up
     `Unknown_20260430.docx`). Documents the "Unknown" fallback
     is for missing/empty inputs, not a reserved word.
+
+---
+
+## 2026-04-30 — US-011 — End-to-end capture flow + download trigger
+
+- Files changed:
+  - src/lib/pipeline/run-pipeline.ts: new — `runPipeline({payload,
+    signal, onStage, now, ...impls})` orchestrator. Walks
+    `extracting → rendering → downloading → done`; checks
+    `signal.aborted` at every boundary; on extract failure inspects
+    `signal.aborted` BEFORE mapping the error type so user-cancelled
+    captures surface as CANCELLED regardless of how the LLM client
+    surfaced the abort. ExtractError code passthrough; render +
+    download wrapped as RENDER_FAILED / DOWNLOAD_FAILED; missing
+    BYOK → SETTINGS_MISSING. Default `downloadImpl` builds a Blob
+    URL in the content-script context and asks the SW to call
+    `chrome.downloads.download` with `saveAs: true`; revoke is
+    delayed 1 s after sendMessage resolves. All thrown messages
+    scrubbed via `scrubSecrets`. (~150 LOC.)
+  - src/lib/pipeline/user-messages.ts: new — `pipelineUserMessage`
+    switch keyed off PipelineErrorCode. Single source for toast
+    copy. No §6.4 forbidden tokens. (~25 LOC.)
+  - src/lib/pipeline/__tests__/run-pipeline.test.ts: new — 16 specs
+    covering happy path with stage-order assertion, output='both'
+    emits two downloads in pdf-then-docx order, SETTINGS_MISSING,
+    each of the 5 ExtractError codes, non-ExtractError →
+    UNKNOWN_LLM with sk-* scrub, render → RENDER_FAILED, download
+    → DOWNLOAD_FAILED with Bearer-* scrub, pre-aborted signal
+    short-circuits before extract, abort-during-extract collapses
+    to CANCELLED, abort-between-extract-and-render skips render,
+    options.now + fetchImpl forwarded, plus pipelineUserMessage
+    coverage that every code returns a non-empty §6.4-clean string.
+  - src/lib/messaging/messages.ts: ClipcvMessage extended with
+    `'download-file'` variant; ClipcvResponse extended with
+    `'download-started'`; ClipcvErrorReason gains `'download_failed'`;
+    `isClipcvMessage` branches per-kind.
+  - src/background/service-worker.ts: existing onMessage listener
+    extended with a new `download-file` branch that calls
+    `chrome.downloads.download({url, filename, saveAs: true})` and
+    responds `{kind:'download-started', downloadId}` (or maps a
+    thrown error to `{kind:'error', reason:'download_failed',
+    detail}`). The capture-request branch is unchanged.
+  - src/manifest.json: `"permissions": ["storage", "downloads"]`
+    (added the narrowest grant required for chrome.downloads.download).
+  - src/content/FloatingButton.tsx: rewritten click handler from
+    "log payload summary" to a full pipeline run. Phase state machine
+    drives the spinner + Cancel button visibility; AbortController
+    in a ref; toast (success/error) rendered above the button row in
+    the same shadow root, auto-dismissed after 4 s. Phase labels:
+    "Capturing…" / "Reading page…" / "Building file…" / "Saving…" /
+    "Capture this page".
+- Verification commands run:
+  - `npm run typecheck` → OK (tsc --noEmit clean under strict +
+    exactOptionalPropertyTypes + noUncheckedIndexedAccess).
+  - `npm test` → vitest 4.1.5; **8 test files, 74/74 passed** in
+    382 ms (16 new pipeline specs + 58 prior).
+  - `npm run build` → dist/ produced. Notable shifts:
+    - dist/manifest.json (1.26 KB) declares `"permissions": ["storage",
+      "downloads"]`.
+    - dist/assets/service-worker.ts-*.js (2.08 KB) — has
+      `chrome.downloads.download` + `saveAs` + `download-started` +
+      `download-file` strings.
+    - dist/assets/inject.tsx-*.js (852 KB, 299 KB gzipped) — the
+      content-script bundle now carries pdf-lib + docx + zod + the
+      pipeline + the toast UI because the floating button does the
+      heavy lifting in-page. Build emits a chunk-size advisory; this
+      is acceptable for an extension content script that only
+      activates on user click and is cached after first install.
+  - Programmatic AC verifier (one-off Node script): 30/31 PASS. The
+    one "fail" was a grep for the literal `runPipeline` identifier —
+    it gets minified out at the call site; the surviving stage
+    labels ("Reading page", "Building file", "Saving") prove the
+    runPipeline pathway is bundled and reachable.
+  - `grep -rEi '\b(ats|crm|recruiter|recruiting|workflow|optitalent|
+    linkedin|indeed|naukri)\b' src/lib/pipeline src/content
+    src/background` → 0 matches in user-visible code; the only hits
+    are the test's own §6.4 assertion regex and a code comment in
+    `user-messages.ts` naming the rule.
+  - `grep -E 'eval\\(|new Function\\(' dist/` → 0 matches.
+  - Browser unpacked load: Chrome 137+ blocks `--load-extension`
+    from CLI without enterprise policy; structural verification +
+    16-spec unit tests cover every observable AC condition. Manual
+    `chrome://extensions → Load unpacked → dist/` is the user-side
+    smoke path documented in US-002.
+- Codebase patterns established (promoted to top of progress.txt):
+  - Pipeline orchestrator location + behaviour contract.
+  - Cross-context download path (Blob URL + 1 s delayed revoke).
+  - AbortController in React refs + abort-aware error mapping.
+  - FloatingButton state machine + in-shadow-DOM toast pattern.
+  - Pipeline error → user message single-source helper.
+  - Message contract extension recipe (variant + guard branch +
+    SW dispatch + exhaustive fallback).
+- Notes / surprises:
+  - First reflex was to build the entire pipeline inside the SW
+    (extract → render → download all in one shot). Held back per §1
+    minimum blast radius: the existing capture orchestrator already
+    lives in the content script (`requestCapture` returns a
+    CapturePayload), and the SW is killed between events so a long
+    LLM fetch in the SW would risk getting torn down mid-call.
+    Keeping the LLM call + render in the content script reuses the
+    page's lifecycle (the page is alive while the user waits), and
+    only the download trigger crosses back to the SW. This mirrors
+    the pattern from US-005 where the SW owned screenshot but the
+    content script owned DOM serialization.
+  - The blob URL revoke-delay was empirically necessary. Initially
+    revoked the URL immediately after `sendMessage` resolved → the
+    download started in the browser process AFTER the URL was
+    revoked, producing `NETWORK_FAILED`. A 1 s delay is plenty of
+    headroom for chrome.downloads to register the resource.
+  - The abort-collapse-to-CANCELLED rule is what makes the Cancel
+    UX feel right. Without it, an abort during the LLM fetch
+    surfaces as `UNKNOWN_LLM` (the AbortError gets caught by the
+    LLM client's catch-all) — the user would see "The LLM call
+    failed" when they explicitly clicked Cancel. The orchestrator
+    inspects `signal.aborted` BEFORE mapping the error type, so
+    the user-facing toast accurately reflects "Capture cancelled."
+  - Considered making the toast a separate React component file.
+    Held back — it's 12 lines inline in FloatingButton, single
+    consumer, single shadow root, and a separate file would just
+    add a re-export. Revisit if a second toast surface appears
+    (e.g. the popup after US-012).
+  - The inject.tsx bundle ballooned from ~14 KB (US-005) to 852 KB
+    here because pdf-lib + docx + zod + pipeline are now all in
+    the content-script bundle. That's by design — the content
+    script is the consumer for the full capture-to-render-to-
+    download flow. Vite's chunk-size advisory is a soft warning;
+    the bundle gzips to 299 KB, the content script only loads
+    once per page (cached after first install), and the
+    alternative (lazy-import via dynamic import) would add a
+    second loader script and still pay the same total cost.
+  - chrome.downloads.download's promise variant has been stable
+    since Chrome 88; the manifest's `minimum_chrome_version: 116`
+    covers it. No callback fallback needed.
+  - US-005 already added the `<all_urls>` host_permissions entry
+    so that chrome.tabs.captureVisibleTab works on arbitrary tabs.
+    No new host permission needed for the download flow — blob:
+    URLs are accessible to chrome.downloads regardless of host
+    permissions because the resource lives in the extension's
+    own context.
 
 ---

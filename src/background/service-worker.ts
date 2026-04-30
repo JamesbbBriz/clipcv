@@ -28,11 +28,20 @@ chrome.runtime.onMessage.addListener((rawMessage: unknown, sender, sendResponse)
     sendResponse(response);
     return false;
   }
-  console.debug('[clipcv] capture-request', rawMessage.url);
-  void handleCaptureRequest(sender, sendResponse);
-  // Returning true keeps the message channel open across the async boundary
-  // until handleCaptureRequest resolves and calls sendResponse.
-  return true;
+  if (rawMessage.kind === 'capture-request') {
+    console.debug('[clipcv] capture-request', rawMessage.url);
+    void handleCaptureRequest(sender, sendResponse);
+    return true;
+  }
+  if (rawMessage.kind === 'download-file') {
+    console.debug('[clipcv] download-file', rawMessage.filename);
+    void handleDownloadFile(rawMessage.url, rawMessage.filename, sendResponse);
+    return true;
+  }
+  // Exhaustiveness fallback — unreachable while the type guard mirrors the union.
+  const fallback: ClipcvResponse = { kind: 'error', reason: 'unknown_kind' };
+  sendResponse(fallback);
+  return false;
 });
 
 async function handleCaptureRequest(
@@ -56,6 +65,24 @@ async function handleCaptureRequest(
       detail,
     };
     sendResponse(response);
+  }
+}
+
+async function handleDownloadFile(
+  url: string,
+  filename: string,
+  sendResponse: (response: ClipcvResponse) => void,
+): Promise<void> {
+  try {
+    const downloadId = await chrome.downloads.download({
+      url,
+      filename,
+      saveAs: true,
+    });
+    sendResponse({ kind: 'download-started', downloadId });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    sendResponse({ kind: 'error', reason: 'download_failed', detail });
   }
 }
 
