@@ -81,8 +81,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Content script entry src/content/inject.tsx mounts a shadow-DOM host (id=clipcv-floating-host) on document.documentElement, idempotent via getElementById guard. Shadow root receives an inlined <style> with the build-time-processed Tailwind v4 stylesheet (?inline import) so host-page CSS cannot bleed in or out. Floating <button> is fixed bottom-4 right-4 with z-index 2147483647; hidden until chrome.storage.local.disclaimer_acceptance.{accepted:true, version: <manifest.version>} matches the running build (gate stub at src/lib/storage/disclaimer-store.ts; US-012 lands the modal that writes it). chrome.storage.onChanged listener flips the gate live without needing a reload. Click dispatches a typed {kind:'capture-request', url:window.location.href, pageTitle:document.title} via chrome.runtime.sendMessage; service worker validates the kind via a discriminated-union type guard (src/lib/messaging/messages.ts) — unknown kinds return {kind:'error', reason:'unknown_kind'}, capture-request returns {kind:'capture-request-ack', receivedAt}. manifest.content_scripts matches `<all_urls>`, run_at=document_idle, all_frames=false. CRXJS emits a tiny loader script + a web_accessible_resources bundle for the actual content code (no inline JS). Build output: dist/assets/inject.tsx-*.js (13.34 KB) with Tailwind CSS string inlined; no separate inject CSS file. 26/26 programmatic AC checks PASS (incl. shadow-root creation, idempotency guard, typed message dispatch, SW handler unknown-kind rejection, no eval / no new Function / no inline scripts); §6.4 forbidden-copy grep over src/content + new src/lib paths clean."
     },
     {
       "id": "US-005",

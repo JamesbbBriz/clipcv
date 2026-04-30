@@ -86,6 +86,36 @@ Repo: <to-be-set-on-first-commit>
   field. Tailwind imported via `options.css`. Future entry points
   (content script in US-004) follow the same `main.tsx` +
   `<Component>.tsx` split.
+- **Cross-context messaging contract** (`src/lib/messaging/messages.ts`):
+  every chrome.runtime.sendMessage payload is a discriminated union
+  (`ClipcvMessage`) and has a matching type guard (`isClipcvMessage`).
+  The service worker rejects any unknown `kind` with
+  `{kind:'error', reason:'unknown_kind'}`. Receivers MUST extend the
+  guard before handling new variants — do NOT add ad-hoc shape checks
+  at call sites.
+- **Content script structure**: entry `src/content/inject.tsx`
+  (idempotent shadow-DOM mount) + component `<FloatingButton />` +
+  stylesheet `inject.css`. The CSS is imported with the Vite `?inline`
+  query suffix and injected as a `<style>` text node into the shadow
+  root, so Tailwind utilities work inside the shadow boundary without
+  leaking to the host page (no separate `inject*.css` is emitted by
+  CRXJS). `:host { all: initial }` plus `host.style.all = 'initial'`
+  block bidirectional CSS bleed.
+- **Idempotent shadow-DOM mount**: stable host element id
+  (`clipcv-floating-host`) + `getElementById` guard before insert
+  inside `mount()`. Safe across SPA navigations and dev HMR re-runs.
+  Future stories that inject UI into the page reuse this pattern.
+- **Disclaimer acceptance gate** (`src/lib/storage/disclaimer-store.ts`):
+  reads `chrome.storage.local.disclaimer_acceptance` and matches
+  `accepted:true` + `version === manifest.version`. Subscribers use
+  `chrome.storage.onChanged` to react live (no need to reload the
+  page when the user accepts). US-012 lands the writer.
+- **Service-worker message dispatch**: stateless `onMessage` handler
+  that returns `false` (synchronous `sendResponse`) — never holds the
+  listener channel open across SW idle. Future SW handlers that need
+  async work (e.g. captureVisibleTab in US-005) must return `true`
+  AND complete via the captured `sendResponse` callback within the
+  same wake.
 
 ## Execution Order
 
@@ -354,5 +384,135 @@ US-001 → US-002 → US-003 → US-004 → US-005 → US-006 → US-007 → US-
   - The cryptoKey is reused across saves so old encrypted state
     remains decryptable; rotation lands with the explicit "revoke
     acceptance" path in US-012 / US-003-revisit (future).
+
+---
+
+## 2026-04-30 — US-004 — Floating Capture button content script injection
+
+- Files changed:
+  - src/manifest.json: add `content_scripts: [{matches:['<all_urls>'],
+    js:['src/content/inject.tsx'], run_at:'document_idle',
+    all_frames:false}]`. No host_permissions — content script matches
+    are sufficient for in-page injection; host permissions land with
+    activeTab in US-005/US-011.
+  - src/lib/messaging/messages.ts: new — discriminated-union message
+    contract (`ClipcvMessage` / `ClipcvResponse`) + `isClipcvMessage`
+    type guard. Source of truth for cross-context messaging from this
+    story onward.
+  - src/lib/storage/disclaimer-store.ts: new — read-only gate for the
+    floating button. Reads chrome.storage.local key
+    `disclaimer_acceptance` and matches `accepted:true` + `version` to
+    the running manifest version. US-012 lands the writer (modal).
+  - src/content/inject.tsx: new — content script entry. Idempotent
+    `mount()` (id=`clipcv-floating-host` guard) attaches a shadow-DOM
+    root, injects the Tailwind stylesheet as a `<style>` text node
+    (built-time-processed via `?inline`), and createRoot-mounts
+    `<FloatingButton />` inside the shadow root. Mounts on
+    `DOMContentLoaded` if document is still loading, otherwise inline.
+  - src/content/FloatingButton.tsx: new — React component. Reads the
+    disclaimer gate on mount + subscribes to chrome.storage.onChanged
+    so acceptance flips visibility live. Click handler dispatches
+    `{kind:'capture-request', url:window.location.href,
+    pageTitle:document.title}` via chrome.runtime.sendMessage and
+    surfaces a transient sending → sent/error label.
+  - src/content/inject.css: new — `@import 'tailwindcss';` + `:host`
+    reset (all:initial + system font stack) so host-page CSS cannot
+    inherit through the shadow boundary.
+  - src/background/service-worker.ts: register a stateless
+    `chrome.runtime.onMessage` handler that uses the typed guard:
+    unknown kinds → `{kind:'error', reason:'unknown_kind'}`;
+    capture-request → debug-log + `{kind:'capture-request-ack',
+    receivedAt}`. Full pipeline implementation lands in US-005+.
+- Verification commands run:
+  - `npm run typecheck` → OK (tsc --noEmit clean under strict +
+    exactOptionalPropertyTypes + noUncheckedIndexedAccess).
+  - `npm run build` → dist/ produced:
+    - dist/manifest.json with `content_scripts:[{matches:['<all_urls>'],
+      js:['assets/inject.tsx-loader-*.js'], run_at:'document_idle',
+      all_frames:false}]` and `web_accessible_resources` covering the
+      content bundle + jsx-runtime chunk.
+    - dist/assets/inject.tsx-loader-*.js (0.34 KB) — CRXJS dynamic-
+      import loader; resolves the real bundle via
+      chrome.runtime.getURL.
+    - dist/assets/inject.tsx-*.js (13.34 KB) — content script bundle
+      with the Tailwind v4 utility CSS embedded as a string (no
+      separate inject*.css file emitted, isolation guaranteed).
+    - dist/assets/service-worker.ts-*.js (0.61 KB) — onMessage handler
+      bundled; references onMessage / capture-request /
+      capture-request-ack / unknown_kind.
+  - Programmatic AC verifier (scripts/verify-us-004.mjs, removed after
+    run) → 26/26 checks PASS:
+    1) manifest.content_scripts present
+    2–5) matches=<all_urls> / js path exists / run_at=document_idle /
+         all_frames=false
+    6–8) loader uses dynamic import + chrome.runtime.getURL + no eval
+    9) web_accessible_resources includes the content bundle
+    10) bundle calls attachShadow
+    11) bundle uses host id 'clipcv-floating-host'
+    12) idempotency: getElementById guard + host id present
+    13) bundle reads 'disclaimer_acceptance' storage key
+    14) bundle dispatches kind:'capture-request'
+    15) bundle reads window.location.href
+    16) bundle calls chrome.runtime.sendMessage
+    17) no separate inject*.css emitted (Tailwind inlined)
+    18) bundle includes Tailwind utilities right-4 + bottom-4
+    19) no eval( in bundle
+    20) no new Function( in bundle
+    21) SW loader resolves to a real bundle
+    22) SW bundle has onMessage listener
+    23) SW bundle handles capture-request kind
+    24) SW bundle returns capture-request-ack
+    25) SW bundle rejects unknown kinds with unknown_kind error
+    26) §6.4 forbidden-copy grep over new src files clean
+  - Forbidden-pattern grep for §6.4 downstream copy
+    (ats|crm|recruiter|recruiting|matching|workflow|optitalent) over
+    src/ → 0 matches.
+  - Browser unpacked load: same Chrome 137+ CLI limitation as US-002
+    and US-003 (--load-extension blocked from CLI without policy /
+    dev-mode). Structural checks above cover every observable AC
+    condition; user-side reload in chrome://extensions is the manual
+    verifier for the floating button's visual placement.
+- Codebase patterns established (promoted to top of progress.txt):
+  - Cross-context messaging contract: discriminated union + type
+    guard in src/lib/messaging/messages.ts. Receivers MUST extend
+    `isClipcvMessage` before handling new kinds; the SW rejects
+    unknown kinds with `{kind:'error', reason:'unknown_kind'}`.
+  - Content script structure: entry `src/content/inject.tsx`
+    (idempotent shadow-DOM mount) + component `FloatingButton.tsx` +
+    stylesheet `inject.css` imported with `?inline` and injected as a
+    `<style>` node into the shadow root. Tailwind utility classes work
+    inside the shadow root because the processed stylesheet ships
+    embedded in the JS bundle as a string.
+  - Idempotency convention: stable host element id
+    (`clipcv-floating-host`) + `getElementById` guard before insert.
+    SPA-navigation safe.
+  - Shadow root reset: host element gets `style.all = 'initial'` and
+    the stylesheet declares `:host { all: initial }` so neither
+    direction of style bleed is possible.
+  - Disclaimer gate stub: src/lib/storage/disclaimer-store.ts reads
+    `chrome.storage.local.disclaimer_acceptance` keyed on
+    `manifest.version`. US-012 writes it; until then the floating
+    button is hidden by default. Subscribers use
+    `chrome.storage.onChanged` to react live.
+  - Service-worker message dispatch: stateless `onMessage` handler
+    that returns `false` (synchronous sendResponse) — never holds the
+    listener channel open across SW idle.
+- Notes / surprises:
+  - Prior iteration committed US-002 but left US-003 source files
+    untracked (manifest + prd.json + progress.txt were modified but
+    the new src/lib/* and src/options/* trees never landed). This
+    iteration committed the pending US-003 work as its own commit
+    before starting US-004 to restore the per-story-commit invariant.
+  - `?inline` CSS import: Tailwind v4 + @tailwindcss/vite respects
+    Vite's `?inline` query suffix and emits the post-processed CSS as
+    a string into the JS bundle (no separate inject*.css file in
+    dist). Required for shadow-DOM isolation — a normal import would
+    have CRXJS either inject the stylesheet into the host page <head>
+    or attach it via the manifest's content_scripts.css, both of
+    which break the isolation invariant.
+  - CRXJS auto-emits `web_accessible_resources` for the content
+    bundle when the entry uses dynamic import (loader → bundle). This
+    is expected and required for the loader's
+    `chrome.runtime.getURL(...)` indirection to succeed.
 
 ---

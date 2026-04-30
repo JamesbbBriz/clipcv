@@ -1,0 +1,23 @@
+@import 'tailwindcss';
+
+/*
+ * The content script mounts inside a shadow root; this stylesheet is injected
+ * into that shadow root via Vite's `?inline` import. CLAUDE.md §9 requires
+ * Tailwind utility classes (no CSS-in-JS), so the floating button declares its
+ * styling via className utilities below; Tailwind's content scanner picks
+ * those up at build time and ships only the used utilities.
+ *
+ * Reset the hosting :host element so the page's CSS does not bleed in via
+ * inheritance (font-size, line-height, color, etc.).
+ */
+:host {
+  all: initial;
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    Roboto,
+    'Helvetica Neue',
+    Arial,
+    sans-serif;
+}
