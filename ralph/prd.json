@@ -45,8 +45,8 @@
         "Verify in browser by loading unpacked"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Tailwind v4 + @tailwindcss/vite installed; popup.html + main.tsx + Popup.tsx + popup.css render the shell with disabled Capture button; manifest.action.default_popup wired; SW logs onInstalled/onStartup/onSuspend at debug level. Build emits dist/manifest.json with action block, dist/src/popup/popup.html, popup-*.css (8.77 KB Tailwind), popup.html-*.js (141 KB React bundle). 18/18 programmatic AC checks PASS; no inline scripts / eval / Function ctor in dist."
     },
     {
       "id": "US-003",

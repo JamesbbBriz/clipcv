@@ -27,6 +27,28 @@ Repo: <to-be-set-on-first-commit>
   auto-rebuilds the extension; reload the extension in chrome://extensions
   to pick up SW changes.
 - **No default exports** in new modules — named exports only (CLAUDE.md §9).
+- **Popup entry naming**: HTML-side script ref is `./main.tsx`; the React
+  component lives in `Popup.tsx`. Rationale: macOS' case-insensitive FS
+  collides `popup.tsx` with `Popup.tsx`, and `forceConsistentCasingInFileNames`
+  amplifies this. Future entry points (options page, content script) follow
+  the same `main.tsx` + `<ComponentName>.tsx` split.
+- **Tailwind**: v4 via `@tailwindcss/vite` plugin (no PostCSS config, no
+  tailwind.config.js needed). Each entry point owns a `*.css` file that
+  starts with `@import 'tailwindcss';`. CRXJS picks up the CSS through
+  the entry HTML's `<link>` (or implicitly via the JS entry's CSS import).
+- **Manifest action block**: `action.default_popup` uses the same
+  `src/<entry>/<file>.html` repo-relative path; CRXJS rewrites it to
+  the bundled `dist/src/<entry>/<file>.html` at build time.
+- **Service worker lifecycle**: minimum coverage is
+  `onInstalled` (install/update) + `onStartup` (browser launch / "activate")
+  + `onSuspend` (just-before-teardown). Listeners must remain stateless —
+  no module-scope mutable state.
+- **Verification of UI stories**: programmatic structural check of `dist/`
+  (manifest fields, popup.html shape, bundle contents, forbidden-pattern
+  grep) is the documented AC verifier. Chrome 137+ blocks
+  `--load-extension` from CLI without policy/dev-mode, so automated
+  unpacked-load is unreliable; the build artifacts + structural checks are
+  the source of truth.
 
 ## Execution Order
 
@@ -106,5 +128,90 @@ US-001 → US-002 → US-003 → US-004 → US-005 → US-006 → US-007 → US-
   - CRXJS 2.4.0 prints "Unknown input options: platform" warning on
     dev start — internal rolldown vs rollup option mismatch in the
     plugin; harmless, dev server still boots and HMR works.
+
+---
+
+## 2026-04-30 — US-002 — Popup UI shell + service worker hello world
+
+- Files changed:
+  - package.json: add devDeps `tailwindcss@4.2.4` + `@tailwindcss/vite@4.2.4`.
+  - package-lock.json: lockfile updated for Tailwind tree.
+  - vite.config.ts: register `tailwindcss()` plugin alongside react + crx.
+  - src/manifest.json: add `action` block with `default_title`,
+    `default_popup: src/popup/popup.html`, and `default_icon` 16/48/128.
+  - src/background/service-worker.ts: add `chrome.runtime.onSuspend`
+    listener (alongside existing onInstalled + onStartup) for the third
+    "runtime" lifecycle category called out in the AC.
+  - src/popup/popup.html: new — minimal MV3-compliant document with
+    `<div id="root">` and a single `<script type="module" src="./main.tsx">`
+    (no inline JS).
+  - src/popup/main.tsx: new — React entrypoint, mounts `<Popup />` into
+    `#root` via `createRoot` + `StrictMode`, imports popup.css.
+  - src/popup/Popup.tsx: new — Tailwind shell: header (clipcv + version),
+    one-line description, **disabled** placeholder Capture button
+    (`disabled` attr + `aria-disabled` + `cursor-not-allowed` style),
+    and a settings hint line.
+  - src/popup/popup.css: new — `@import 'tailwindcss';` plus a
+    `:root` font stack and a body min-width to keep popup ≥ 18 rem wide.
+- Verification commands run:
+  - `npm install tailwindcss@4.2.4 @tailwindcss/vite@4.2.4 -D` → 18 added,
+    103 audited; 2 high-severity advisories on `rollup <2.80.0` are
+    transitive build-time deps of `@crxjs/vite-plugin@2.4` (dev-only,
+    runtime extension unaffected). Documented; no force-fix.
+  - `npm run typecheck` → OK (tsc --noEmit clean under strict +
+    exactOptionalPropertyTypes + noUncheckedIndexedAccess).
+  - `npm run build` → dist/ produced:
+    - manifest.json (620 B) with action.default_popup =
+      `src/popup/popup.html`
+    - dist/src/popup/popup.html (408 B) — `<script type="module">`
+      injected by Vite, no inline JS
+    - dist/assets/popup-cOFofGcR.css (8.77 kB) — compiled Tailwind
+    - dist/assets/popup.html-DNWw-fqM.js (141.67 kB) — React + Popup
+    - service-worker-loader.js (49 B) →
+      assets/service-worker.ts-KrSx1qVq.js (252 B) bundle has all three
+      listener registrations (`onInstalled` / `onStartup` / `onSuspend`).
+  - Programmatic AC verifier (one-off node script, removed after run)
+    → 18/18 checks PASS:
+    1) manifest_version=3, 2) name=clipcv, 3) action.default_popup set,
+    4) popup.html exists in dist, 5) popup.html has #root,
+    6) popup.html has type=module script,
+    7) popup.html has no inline executable script,
+    8–10) SW bundle has onInstalled/onStartup/onSuspend strings,
+    11) popup bundle has createRoot, 12) "Capture this page" text,
+    13) disabled attribute marker, 14) "clipcv" heading,
+    15) Tailwind utilities (.flex / .w-72 / .rounded-md) present in CSS,
+    16) CSS non-trivial (>1000 B), 17) no `eval(` in dist,
+    18) no `new Function(` in dist.
+  - Forbidden-pattern grep for §6.4 downstream copy
+    (ats|crm|recruiter|matching|workflow|optitalent) over src/popup
+    → 0 matches.
+  - Browser unpacked load: Chrome 147 blocks `--load-extension` from CLI
+    without an enterprise policy or dev-mode toggle, so automated
+    headless verification is unreliable on this version. Structural
+    checks above cover every observable AC condition.
+- Codebase patterns established (promoted to top of progress.txt):
+  - Popup entry naming convention: `main.tsx` (entry) +
+    `<Component>.tsx` (component) — avoids macOS case-insensitive
+    filesystem collisions under `forceConsistentCasingInFileNames`.
+  - Tailwind v4 via `@tailwindcss/vite`: each entry owns a `*.css` file
+    starting with `@import 'tailwindcss';`. No tailwind.config.js needed.
+  - Service worker lifecycle minimum: onInstalled + onStartup + onSuspend.
+  - Verification convention for UI stories: programmatic structural
+    check of dist/ (chrome --load-extension is unreliable from CLI on
+    Chrome 137+).
+- Notes / surprises:
+  - macOS case-insensitive FS forced renaming the entry from
+    `popup.tsx` to `main.tsx` (Popup.tsx component file collided).
+  - `npm audit` flagged rollup <2.80.0 (high severity, dev-only,
+    transitive through @crxjs/vite-plugin@2.4); `npm audit fix --force`
+    would downgrade CRXJS to v1, breaking US-001's tooling — declined.
+    Since rollup runs only at build time and produces no runtime code
+    affected by the path-traversal CVE on a trusted local repo, the
+    risk in this project's threat model is negligible. Revisit when
+    @crxjs/vite-plugin pulls a newer rollup.
+  - Chrome 147 silently ignores `--load-extension` from CLI (Google
+    deprecated it for non-policy invocations starting Chrome 137).
+    Documented; future UI verifications rely on structural checks +
+    user manual reload in chrome://extensions.
 
 ---
