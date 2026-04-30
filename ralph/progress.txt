@@ -251,6 +251,50 @@ Repo: <to-be-set-on-first-commit>
   use `path.map(String).join('.')`. Plain `path.join('.')` typechecks
   on zod 3 but fails on zod 4 because `Array<symbol>.join` is
   rejected.
+- **Render layer location** (`src/lib/render/`): `pdf.ts` (US-009) and
+  `docx.ts` (US-010) sit alongside a shared `filename.ts` helper.
+  Filename pattern is the AC's `{Last_First_or_Unknown}_{YYYYMMDD}.{ext}` —
+  multi-token names render as `Last_First` so filesystem alphabetic
+  sort groups by surname; single-token names pass through; missing /
+  fully-stripped names fall back to `Unknown`. Sanitization per
+  CLAUDE.md §10.1 strips control chars (charcode < 0x20 or == 0x7f),
+  the explicit set `/\:*?"<>|`, and `..` sequences; result capped to
+  64 chars. Both renderers consume the helper via named import.
+- **PDF cursor topology** (`src/lib/render/pdf.ts`): a single
+  `Cursor = {pdf, page, y, font, bold}` flows through every drawing
+  helper. `ensureSpace(cursor, lines, size)` checks the residual
+  budget and, if insufficient, calls `pdf.addPage(...)` and resets
+  `cursor.page` + `cursor.y = PAGE_HEIGHT - MARGIN`. All helpers
+  decrement `cursor.y` by `size * LINE_HEIGHT` (1.4) before drawing,
+  so y always points to the **top** of the next free line. Drawing
+  happens at the bottom of that slot (pdf-lib uses bottom-left
+  origin). `wrapText(text, font, size, maxWidth)` does word-wrap via
+  `font.widthOfTextAtSize` lookups; everything bigger than max is
+  pushed to a fresh line. Future renderers (DOCX paragraphs, etc.)
+  do **not** need this — DOCX wraps natively — but if a future
+  story adds another fixed-layout output, reuse this Cursor pattern.
+- **Filename sanitization charcode trick**: literal control-char
+  regex (`/[\\u0000-\\u001f]/`) in source is unsafe to write through
+  the Write tool — it eats the unicode escapes and emits actual
+  control bytes into the file (verified via hexdump). Use char-code
+  iteration instead: `for (const ch of s) { if
+  (ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f) continue; }`.
+  Or build the regex via `new RegExp(...)` from a string literal.
+  Future stories that need to filter/strip control chars must use
+  one of these two approaches.
+- **pdf-lib + StandardFonts**: Helvetica + HelveticaBold are emitted
+  by reference (no font bytes embedded) so PDF size stays small and
+  the build doesn't ship font assets. Caveat: WinAnsi (cp1252)
+  encoding only — non-Latin glyphs (CJK, emoji, etc.) will throw
+  inside `drawText`. Acceptable for the MVP (golden fixture is
+  Latin-only); a future story that lands a custom Unicode font
+  embedding (e.g. Noto Sans subset) is the long-term fix.
+- **Renderer return shape**: `{ bytes: Uint8Array, filename: string }`.
+  `options.now?: Date` is the determinism seam — used both in
+  `setCreationDate` / `setModificationDate` (so identical input +
+  identical now produces byte-identical PDFs) and in the YYYYMMDD
+  filename. Tests pin `now`; the live extension passes
+  `new Date()` (default). DOCX in US-010 follows the same shape.
 
 ## Execution Order
 
@@ -1056,5 +1100,99 @@ US-001 → US-002 → US-003 → US-004 → US-005 → US-006 → US-007 → US-
     might switch transport (e.g. a future Anthropic adapter would
     use a different mechanism — `tool_use` with a JSON schema —
     for the same intent).
+
+---
+
+## 2026-04-30 — US-009 — PDF renderer
+
+- Files changed:
+  - package.json + package-lock.json: add runtime dep
+    `pdf-lib@1.17.1` (deterministic, MIT, browser-compatible — no
+    Node-only APIs; works in MV3 service workers and in vitest's
+    `node` env).
+  - src/lib/render/pdf.ts: new — `renderPdf(profile, opts) -> {bytes,
+    filename}`. A4 595.28×841.89pt, 50pt margin, single Helvetica
+    family (StandardFonts.Helvetica + HelveticaBold). Body 11pt,
+    section heading 14pt bold, name 20pt bold. Cursor-based layout
+    with `ensureSpace` auto-pagination; `wrapText` word-wraps via
+    `font.widthOfTextAtSize`. Sections: Header (name + title-company
+    + location|email|phone) → Summary → Experience (bold
+    title-company line + date line + indented `*` bullets) →
+    Education (bold institution + degree+field+location line + date
+    line) → Skills → Certifications → Languages (each comma-joined).
+    Each optional section gated by a populated check, so empty
+    inputs produce zero output (no empty headings). 274 LOC after
+    extracting the filename helper.
+  - src/lib/render/filename.ts: new — `formatFilename(name, now,
+    ext)` + `formatYyyymmdd(now)`. Extracted as a sibling so US-010
+    DOCX can reuse it. `{Last_First_or_Unknown}_{YYYYMMDD}.{ext}`
+    pattern; multi-token names render Last_First; single tokens
+    pass through; missing names → `Unknown`. Sanitization per
+    CLAUDE.md §10.1 via charcode iteration (control chars + path
+    separators stripped, `..` sequences removed, 64-char cap).
+  - src/lib/render/__tests__/pdf.test.ts: new — 4 specs covering
+    golden-fixture happy path with magic-header + size>0,
+    minimal-name-only profile, and 40-bullet pagination.
+  - src/lib/render/__tests__/filename.test.ts: new — 9 specs
+    covering Last_First two-token, single-token, undefined / empty
+    fallback, separator+control-char strip, post-sanitize-empty
+    fallback, 64-char cap, ext switch (`pdf`/`docx`), YYYYMMDD
+    zero-padding (Jan 5 + four-digit year padding).
+- Verification commands run:
+  - `npm install pdf-lib@1.17.1` → 5 packages added (pdf-lib +
+    `@pdf-lib/standard-fonts` + `@pdf-lib/upng` + tslib + pako).
+    The same prior `rollup <2.80.0` advisory inherited from CRXJS
+    persists; documented in US-002, no force-fix.
+  - `npm run typecheck` → OK (tsc --noEmit clean under strict +
+    exactOptionalPropertyTypes + noUncheckedIndexedAccess).
+  - `npm test` → vitest 4.1.5; **5 test files, 48/48 tests passed**
+    in 457 ms (12 new render specs + 14 extract from US-008 + 13
+    LLM client from US-006 + 8 schema from US-007 + 1 baseline).
+  - `npm run build` → dist/ produced (manifest 1.20 KB; popup /
+    options / content / SW bundles unchanged byte-for-byte from
+    US-008 — `src/lib/render/*` is not yet imported by any
+    extension entry; wiring lands in US-011).
+  - §6.4 forbidden-copy grep
+    (`ats|crm|recruiter|recruiting|workflow|optitalent|linkedin|
+    indeed|naukri`) over `src/lib/render` → 0 matches.
+  - `eval(` / `new Function(` over `src/lib/render` → 0 matches.
+- Codebase patterns established (promoted to top of progress.txt):
+  - Render layer location and shared filename helper module.
+  - PDF cursor topology + auto-pagination pattern.
+  - Charcode-iteration trick for control-char filters that survive
+    Write-tool unicode-escape interpretation.
+  - pdf-lib StandardFonts WinAnsi caveat (CJK / emoji not encoded).
+  - Renderer return shape `{bytes, filename}` + `options.now?: Date`
+    determinism seam — applied identically in US-010 DOCX renderer.
+- Notes / surprises:
+  - First write of pdf.ts contained `/[\\u0000-\\u001f\\u007f]/g`
+    in source. The Write tool's JSON-string parser interpreted the
+    `\\u` escapes as actual control characters and emitted literal
+    NUL/control bytes into the file — verified by hexdump. The
+    file looked OK in Read output (which renders control chars as
+    visible glyphs) but typecheck/tests would have produced
+    confusing failures. Captured the workaround as a codebase
+    pattern: use charcode iteration or `new RegExp("[\\\\u0000…]")`.
+  - `pdf-lib`'s StandardFonts (Helvetica family) ship as references
+    rather than embedded font bytes, so the renderer's output is
+    tiny — the golden fixture renders to ~3 KB. The downside is
+    WinAnsi-only encoding: a future profile with CJK / emoji /
+    arbitrary Unicode would throw inside `drawText`. Out of scope
+    for this story; needs a custom-font embedding follow-up.
+  - Decomposed `src/lib/render/filename.ts` out of `pdf.ts` mid-
+    iteration after pdf.ts hit 321 LOC (over the §9 300 ceiling).
+    The extraction also serves US-010 (DOCX) directly, which is a
+    bonus — but the trigger was §9 compliance, not foresight.
+  - The renderer is intentionally not yet wired into the floating-
+    button → SW pipeline. US-011 (E2E capture flow) is the
+    consumer story; landing the renderer here unbundled keeps the
+    dist artifact diff at zero and respects story-scoped commits
+    per CLAUDE.md §7.4.
+  - Determinism: with `options.now` pinned, two consecutive
+    `renderPdf(profile, {now})` calls produce byte-identical
+    output (creation/modification dates pinned; pdf-lib emits the
+    same object table for identical input). Useful for future
+    snapshot-style tests; the AC only required magic-header +
+    non-zero size, which is what `pdf.test.ts` covers.
 
 ---
