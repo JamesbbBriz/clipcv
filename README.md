@@ -84,7 +84,7 @@ Listing pending review. Once published, the link will appear here.
 
 ### Manual install (signed `.crx`)
 
-Each tagged release attaches a signed `.crx` and a `.zip` to the [Releases page](https://github.com/JamesbbBriz/clipcv/releases). Drag the `.crx` onto `chrome://extensions` (Developer mode enabled) to install.
+No tagged release yet. Once the first `v*` tag is pushed, the [release workflow](./.github/workflows/release.yml) will attach a signed `.crx` and a `.zip` to the [Releases page](https://github.com/JamesbbBriz/clipcv/releases) automatically — drag the `.crx` onto `chrome://extensions` (Developer mode enabled) to install. Until then, use the unpacked path below.
 
 ### Developer mode (unpacked)
 
@@ -141,7 +141,8 @@ No backend. No analytics SDK. No npm-based LLM SDKs — calls go through `fetch`
 
 | | |
 |---|---|
-| Version | `0.1.0` (MVP) |
+| Source version | `0.1.0` (15-story MVP, untagged) |
+| Releases | No tag pushed yet — install via `npm run build` + unpacked load |
 | Manifest | V3 |
 | Minimum Chrome | 116 |
 | Tests | 74 / 74 passing |
