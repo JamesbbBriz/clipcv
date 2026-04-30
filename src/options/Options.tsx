@@ -11,6 +11,7 @@ import {
   type TestErrorCode,
   type TestResult,
 } from '@/lib/llm/test-connection';
+import { clearDisclaimerAcceptance } from '@/lib/storage/disclaimer-store';
 import { scrubSecrets } from '@/lib/util/scrub-secrets';
 
 interface ProviderPreset {
@@ -61,12 +62,19 @@ type Status =
   | { kind: 'tested'; result: TestResult }
   | { kind: 'error'; message: string };
 
+type RevokeStatus =
+  | { kind: 'idle' }
+  | { kind: 'revoking' }
+  | { kind: 'revoked' }
+  | { kind: 'error'; message: string };
+
 export function Options(): JSX.Element {
   const [settings, setSettings] = useState<ByokSettings>(DEFAULT_SETTINGS);
   const [apiKey, setApiKey] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [status, setStatus] = useState<Status>({ kind: 'idle' });
+  const [revokeStatus, setRevokeStatus] = useState<RevokeStatus>({ kind: 'idle' });
 
   useEffect(() => {
     void (async () => {
@@ -142,6 +150,17 @@ export function Options(): JSX.Element {
       apiKey,
     });
     setStatus({ kind: 'tested', result });
+  }
+
+  async function handleRevoke(): Promise<void> {
+    setRevokeStatus({ kind: 'revoking' });
+    try {
+      await clearDisclaimerAcceptance();
+      setRevokeStatus({ kind: 'revoked' });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Revoke failed.';
+      setRevokeStatus({ kind: 'error', message: scrubSecrets(message) });
+    }
   }
 
   return (
@@ -269,7 +288,43 @@ export function Options(): JSX.Element {
 
         <StatusBanner status={status} />
       </form>
+
+      <section className="flex flex-col gap-2 border-t border-slate-200 pt-5">
+        <h2 className="text-sm font-semibold tracking-tight">Disclaimer</h2>
+        <p className="text-xs leading-snug text-slate-600">
+          You accepted the clipcv disclaimer when you first opened the popup. You can revoke
+          your acceptance below; the popup will re-show the disclaimer the next time you open it
+          and the floating Capture button will hide until you accept again.
+        </p>
+        <div>
+          <button
+            type="button"
+            onClick={() => void handleRevoke()}
+            disabled={revokeStatus.kind === 'revoking'}
+            className="rounded-md border border-rose-200 bg-white px-4 py-2 text-sm font-medium text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:text-rose-300"
+          >
+            {revokeStatus.kind === 'revoking' ? 'Revoking…' : 'Revoke disclaimer acceptance'}
+          </button>
+        </div>
+        <RevokeBanner status={revokeStatus} />
+      </section>
     </main>
+  );
+}
+
+function RevokeBanner({ status }: { status: RevokeStatus }): JSX.Element | null {
+  if (status.kind === 'idle' || status.kind === 'revoking') return null;
+  if (status.kind === 'revoked') {
+    return (
+      <p role="status" className="rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+        Disclaimer acceptance cleared. Open the popup to re-accept.
+      </p>
+    );
+  }
+  return (
+    <p role="alert" className="rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-700">
+      {status.message}
+    </p>
   );
 }
 

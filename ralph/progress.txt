@@ -402,6 +402,42 @@ Repo: <to-be-set-on-first-commit>
   (rawMessage.kind === ...)` branch returning `true` for async work;
   the listener's tail is an exhaustiveness fallback that returns
   `unknown_kind`.
+- **Markdown-as-build-time-string** (`?raw`): for any docs file that
+  must appear verbatim in the UI (e.g. `DISCLAIMER.md` rendered in
+  the popup), `import md from '../../DISCLAIMER.md?raw'` returns a
+  `string` typed by `vite/client.d.ts`'s wildcard `*?raw` declaration.
+  Render inside `<pre className="whitespace-pre-wrap break-words
+  font-sans">` so markdown characters display literally — guarantees
+  "verbatim" matching to the on-disk file (mechanically verifiable
+  by grepping the bundle for distinctive sentences). DO NOT add a
+  markdown library — minimum blast radius wins. Imports across the
+  project root (e.g. from `src/popup` to repo-root `DISCLAIMER.md`)
+  work without `vite.server.fs.allow` tweaks because the project
+  root is the default allow-root.
+- **Disclaimer acceptance lifecycle** (`src/lib/storage/disclaimer-store.ts`):
+  full read/write/clear contract — `loadDisclaimerAcceptance`,
+  `isDisclaimerAccepted(version)`, `saveDisclaimerAcceptance(version,
+  now=new Date())` writes `{accepted:true, version, acceptedAt:
+  now.toISOString()}`, `clearDisclaimerAcceptance()` removes the key.
+  On-disk shape uses camelCase `acceptedAt` (matches the existing TS
+  interface). The save/clear functions land in the **shared** chunk
+  (rolldown hoists shared exports), so verification scripts grep
+  across popup / options / jsx-runtime bundles rather than assume
+  one per-page bundle owns the call.
+- **Live-reactive UI keyed off chrome.storage.local**: pattern is
+  `useState<boolean | null>(null)`, `useEffect` both loads the value
+  once AND subscribes to `chrome.storage.onChanged` filtered to
+  `area === 'local'` AND `changes[KEY]` truthy. Any write from any
+  context (the popup itself, options page, content script) flips the
+  state without manual reload. Used by `FloatingButton.tsx` (US-004)
+  and `Popup.tsx` (US-012). Reuse for any future store key whose UI
+  needs to react cross-context.
+- **Popup-takeover sizing**: the popup body has `min-width: 18rem`
+  from `popup.css`; for full-takeover modes (disclaimer) set
+  `w-[480px] h-[600px]` on the modal's `<main>` element directly.
+  Chrome popup max is ~800x600 — 480x600 fits and is large enough
+  to read multi-paragraph copy without per-line wrapping pain. No
+  `popup.css` change needed.
 
 ## Execution Order
 
@@ -1536,5 +1572,30 @@ US-001 → US-002 → US-003 → US-004 → US-005 → US-006 → US-007 → US-
     URLs are accessible to chrome.downloads regardless of host
     permissions because the resource lives in the extension's
     own context.
+
+---
+
+## 2026-04-30 — US-012 — Install-time disclaimer modal + accept gate
+
+- Files changed:
+  - src/lib/storage/disclaimer-store.ts: add `saveDisclaimerAcceptance(version, now=new Date())` writing `{accepted:true, version, acceptedAt: now.toISOString()}` to `chrome.storage.local.disclaimer_acceptance`; add `clearDisclaimerAcceptance()` calling `chrome.storage.local.remove(DISCLAIMER_KEY)`. Existing reader `isDisclaimerAccepted(version)` is unchanged — version-keyed match is the gate.
+  - src/popup/DisclaimerModal.tsx: new — renders verbatim DISCLAIMER.md (imported via `import disclaimerMd from '../../DISCLAIMER.md?raw'`) inside a 480x600 popup-takeover with scrollable `<pre className="whitespace-pre-wrap font-sans">` body and an "I accept" footer button that awaits `saveDisclaimerAcceptance(version)`. Inline error alert on save failure; the `chrome.storage.onChanged` listener in Popup.tsx flips the gate to true and unmounts the modal.
+  - src/popup/Popup.tsx: rewritten as a 3-state gate (`null` Loading / `false` <DisclaimerModal/> / `true` original capture-shell). Mirrors FloatingButton.tsx's pattern — useEffect both loads the current acceptance and subscribes to `chrome.storage.onChanged` so any storage write (from the modal itself, or from the options-page revoke) flips the popup live.
+  - src/options/Options.tsx: import `clearDisclaimerAcceptance`; add `RevokeStatus` discriminated union + `handleRevoke()` + a bordered <section> "Disclaimer" with a rose-bordered "Revoke disclaimer acceptance" button + an `<RevokeBanner>` that surfaces "Disclaimer acceptance cleared" on success or a scrubbed error on failure. The popup's onChanged listener picks up the storage delete instantly.
+- Verification commands run:
+  - `npm run typecheck` → OK (tsc --noEmit clean)
+  - `npm test` → 8 files / 74 passed (no new tests — UI-gate story per CLAUDE.md §7.3 has no unit-test AC; the existing pipeline + extract + render + schema + LLM-client suites still green)
+  - `npm run build` → dist/manifest.json 1.26 KB, dist/assets/popup.html-*.js 5.91 KB (DisclaimerModal + verbatim disclaimer text inlined), dist/assets/options.html-*.js 9.28 KB (revoke section), dist/assets/jsx-runtime-*.js 140.76 KB (saveDisclaimerAcceptance + clearDisclaimerAcceptance hoisted into shared chunk by rolldown). Service worker unchanged.
+  - 27/27 programmatic AC checks PASS — popup carries 'clipcv disclaimer' title + 'I accept' button + 8 verbatim DISCLAIMER.md sentences ('Terms of service compliance', 'Authorized access only', 'Data protection laws', 'No bulk or automated use', 'Your LLM provider', 'You must accept this disclaimer once', 'Last updated: 2026-04-30', 'clipcv — User Responsibility Disclaimer'); shared chunk contains storage key 'disclaimer_acceptance' + chrome.storage.local.set({[g]:n}) with acceptedAt:t.toISOString() + accepted:!0 + chrome.storage.local.remove(g); options carries 'Revoke disclaimer acceptance' label + 'Disclaimer acceptance cleared' confirm + 'revoking' phase string; content bundle still gates on disclaimer_acceptance key (US-004 contract intact); no eval / new Function in dist popup/options/jsx-runtime/inject; popup.html + options.html load module scripts via external `src=` (no inline JS).
+  - §6.4 forbidden-copy grep over DisclaimerModal.tsx + Popup.tsx + Options.tsx + disclaimer-store.ts + DISCLAIMER.md → 0 hits for ats/crm/recruiter/recruiting/workflow/optitalent/linkedin/indeed/naukri/'matching pipeline'/'upload to your'.
+- Codebase patterns established (promoted to top of progress.txt):
+  - **DISCLAIMER.md as build-time string** (`?raw`): single source of truth for the disclaimer modal text. Import via `import disclaimerMd from '../../DISCLAIMER.md?raw'` from anywhere in `src/`. Vite's wildcard `*?raw` declaration in `vite/client.d.ts` gives it a `string` type with no extra config. Render verbatim inside `<pre className="whitespace-pre-wrap font-sans">` so markdown characters (`#`, `*`, etc.) display literally — guarantees "verbatim" matching to the on-disk file (mechanically verifiable by grepping the bundle for distinctive sentences). DO NOT add a markdown library — minimum blast radius wins.
+  - **Disclaimer acceptance write/clear contract** (`src/lib/storage/disclaimer-store.ts`): the store now exports the full lifecycle — `loadDisclaimerAcceptance`, `isDisclaimerAccepted(version)` (existing), `saveDisclaimerAcceptance(version, now=new Date())` (writes `{accepted:true, version, acceptedAt: now.toISOString()}`), `clearDisclaimerAcceptance()` (removes the key). Default `now = new Date()` keeps callers terse; tests can pin `now` if/when persistence-layer tests get added. The on-disk shape uses camelCase `acceptedAt` (matches the existing TS interface and the rest of the codebase) — the AC's snake_case `accepted_at` is treated as a pseudo-code field name.
+  - **Popup gate pattern**: `useState<boolean | null>(null)` for the acceptance flag; `useEffect` both loads it once and registers a `chrome.storage.onChanged` listener filtered to `area === 'local'` AND `changes['disclaimer_acceptance']` truthy. Any write to that key (including the `clearDisclaimerAcceptance` from the options page) flips the popup state without manual reload. Same shape as `FloatingButton.tsx`'s gate — copy that scaffold for any future "live-reactive UI keyed off chrome.storage.local" story.
+  - **Popup-takeover sizing**: the popup body has `min-width: 18rem` from popup.css; for full-takeover modes (disclaimer) we set `w-[480px] h-[600px]` on the modal's `<main>` element directly. Chrome popup max is ~800x600 — 480x600 fits comfortably and is large enough to read multi-paragraph copy without per-line wrapping pain. No popup.css change needed.
+- Notes / surprises:
+  - DISCLAIMER.md was already committed at the repo root from earlier work (US-013's docs landed partial); we treat it as the source of truth here. US-013 will continue to own README/PRIVACY/store-listing copy.
+  - The `chrome.storage.local.remove` and `.set` for the disclaimer record end up in the **shared** `jsx-runtime` chunk rather than the per-page bundle, because the disclaimer-store module is imported from both popup (save) and options (clear) and rolldown's chunking algorithm hoists shared exports. Verification scripts must search across `popup.html-*.js` / `options.html-*.js` / `jsx-runtime-*.js` rather than assume any single per-page bundle owns the storage call.
+  - The build emits an "rollupOptions and rolldownOptions both specified by 'crx:content-scripts' plugin" warning since US-001 — harmless, internal CRXJS quirk.
 
 ---
