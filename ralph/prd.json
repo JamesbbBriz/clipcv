@@ -116,8 +116,8 @@
         "Typecheck passes"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "callVisionLLM lives in src/lib/llm/client.ts, dispatches via ADAPTERS[provider] in src/lib/llm/adapters.ts (single OpenAI-compatible builder shared by openai/openrouter/custom — adapter layer is the home for future per-provider quirks like Anthropic /v1/messages). Builds /chat/completions with messages:[{role:'user',content:[{type:'text'},{type:'image_url',image_url:{url:'data:image/png;base64,...'}}]}], 30s default timeout via AbortController, single retry on 5xx, no retry on 4xx. Throws AuthError/TimeoutError/RateLimitedError/BadRequestError/UnknownLlmError (src/lib/llm/errors.ts) — every thrown message scrubbed via scrubSecrets. vitest 4.1.5 wired (vitest.config.ts mirrors vite.config.ts decodeURIComponent alias trick), `npm test` script added; 13/13 tests pass covering happy path, timeout, 401/403 → AuthError, 429 → RateLimitedError, 400 → BadRequestError, 5xx retries exactly once + recovers, 5xx-then-5xx → UnknownLlmError, sk-* scrubbing in error messages, malformed 200 response → UnknownLlmError, baseUrl trailing-slash join, raw-base64-without-data-prefix handling, request shape (URL + headers + body parts). typecheck + build clean; new src/lib/llm/* never imports a chrome.* API or DOM — runs in any fetch-capable environment incl. vitest's node env. No §6.4 forbidden copy in new files. Not yet wired into any extension entry — the integration into the floating-button click pipeline lands in US-011."
     },
     {
       "id": "US-007",

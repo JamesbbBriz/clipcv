@@ -156,6 +156,39 @@ Repo: <to-be-set-on-first-commit>
   via toolbar action / context menu / keyboard shortcut gestures.
   Future stories that need broader cross-origin access already fall
   under this grant; do not redeclare.
+- **LLM client topology** (`src/lib/llm/`): three-file split —
+  `client.ts` (transport: timeout via AbortController, one-retry-on-5xx
+  / no-retry-on-4xx, response shape extraction `choices[0].message.
+  content`, typed-error mapping), `adapters.ts` (per-provider request
+  shaping; `Adapter = (input) => {url, headers, body}`; current map is
+  `openai/openrouter/custom` → single OpenAI-compatible builder), and
+  `errors.ts` (5 typed subclasses of a private `LlmError` base:
+  `AuthError`/`TimeoutError`/`RateLimitedError`/`BadRequestError`/
+  `UnknownLlmError`). Adding a non-OpenAI-shaped provider = add one
+  builder in adapters.ts + flip its entry in `ADAPTERS`. client.ts is
+  provider-agnostic.
+- **Typed-error class pattern**: each subclass sets `this.name` inside
+  its own constructor — NOT via `override name = '...'` class field.
+  Avoids the TS `noImplicitOverride` interaction with Error's
+  interface-declared `name` (Error is declared as an interface, not a
+  class, in lib.es5.d.ts) and is compatible with
+  `exactOptionalPropertyTypes: true`.
+- **Test runner**: vitest 4.x via `npm test` (which runs `vitest run`
+  — single-shot, no watch). Tests live in
+  `src/<area>/__tests__/*.test.ts`. Config in `vitest.config.ts` is
+  separate from `vite.config.ts` (so vitest does not load CRXJS) and
+  reuses the `decodeURIComponent(new URL('./src',
+  import.meta.url).pathname)` trick to resolve `@/*` alias under the
+  repo's space-containing path.
+- **Injectable I/O for unit tests**: any module that does fetch /
+  timeout work accepts `fetchImpl?: typeof fetch` + `timeoutMs?:
+  number` opts. Defaults preserve production behaviour; tests inject
+  `vi.fn` returning mocked `Response` objects. No global fetch
+  monkey-patching, no msw needed yet.
+- **Pre-display secret scrubber discipline**: every thrown LLM error
+  message is scrubbed via `scrubSecrets()` BEFORE construction (so
+  it's safe to surface in toasts / logs). Stories that introduce new
+  provider-error display surfaces MUST keep this invariant.
 
 ## Execution Order
 
@@ -701,5 +734,116 @@ US-001 → US-002 → US-003 → US-004 → US-005 → US-006 → US-007 → US-
     so deferred to US-006 / US-007 / US-008 where unit tests are
     explicit acceptance criteria. Pure-logic round-trip for the
     1 MB cap was verified inline in the one-off node verifier.
+
+---
+
+## 2026-04-30 — US-006 — Vision LLM provider abstraction
+
+- Files changed:
+  - package.json: add devDep `vitest@^4.1.5` + `"test": "vitest run"`
+    script. No other deps needed; the client uses native fetch +
+    AbortController + Response, all available in MV3 service workers
+    AND in vitest's `node` environment.
+  - package-lock.json: lockfile updated for the vitest tree.
+  - vitest.config.ts: new — `defineConfig({resolve:{alias:{'@':srcDir}},
+    test:{environment:'node', include:['src/**/__tests__/**/*.test.ts']}})`.
+    Separate from vite.config.ts so vitest does not pull in the CRXJS
+    plugin (which expects a real manifest + browser target). Reuses
+    the `decodeURIComponent(new URL('./src', import.meta.url).pathname)`
+    trick from vite.config.ts to handle the space in the repo path.
+  - src/lib/llm/errors.ts: new — five typed Error subclasses
+    (AuthError, TimeoutError, RateLimitedError, BadRequestError,
+    UnknownLlmError) all extending a private LlmError base. Each sets
+    `this.name` in its constructor (clean across noImplicitOverride
+    because we don't use the `override` modifier on Error.name —
+    Error.name is declared on an interface in lib.es5.d.ts, not on a
+    class field).
+  - src/lib/llm/adapters.ts: new — `Adapter`/`AdapterInput`/
+    `AdapterRequest` types + a single `buildOpenAICompatibleRequest`
+    shared by `openaiAdapter`, `openrouterAdapter`, `customAdapter`.
+    The provider→adapter map (`ADAPTERS: Record<Provider, Adapter>`)
+    is the single dispatch point. The shared builder produces a
+    /chat/completions POST with vision content array
+    `[{type:'text',text}, {type:'image_url',image_url:{url}}]`. The
+    image URL is the screenshot_b64 if it already starts with
+    `data:`, otherwise `data:image/png;base64,${b64}` is prepended —
+    so callers can pass either form.
+  - src/lib/llm/client.ts: new — `callVisionLLM(input) → string`.
+    Owns the timeout (30s default, AbortController), the one-retry-
+    on-5xx / no-retry-on-4xx policy, OpenAI response shape extraction
+    (`json.choices[0].message.content`), and the typed-error mapping
+    (401/403→AuthError, 429→RateLimitedError, 4xx-other→
+    BadRequestError, 5xx-after-retry→UnknownLlmError, AbortError→
+    TimeoutError, malformed JSON / missing content→UnknownLlmError).
+    Every thrown message goes through `scrubSecrets()` first (CLAUDE
+    §6.2). `fetchImpl` and `timeoutMs` are injectable for tests.
+  - src/lib/llm/__tests__/client.test.ts: new — 13 tests covering
+    happy path / 401 / 403 / 429 / 400 / 5xx-retry-success /
+    5xx-retry-exhausted / timeout / sk-* scrubbing / malformed-200 /
+    baseUrl-trailing-slash join / raw-base64-no-data-prefix /
+    request-shape sanity (vision content parts, Authorization header,
+    URL).
+- Verification commands run:
+  - `npm install -D vitest` → vitest 4.1.5 + 24 packages added.
+    (Same prior `rollup <2.80.0` advisory inherited from CRXJS;
+    documented in US-002, no force-fix.)
+  - `npm run typecheck` → OK (tsc --noEmit clean under strict +
+    exactOptionalPropertyTypes + noUncheckedIndexedAccess).
+  - `npm test` → vitest 4.1.5; **1 test file, 13/13 tests passed**
+    in 212 ms. Tests run in `node` env using native fetch + Response
+    + AbortController; no chrome.* mocking required.
+  - `npm run build` → dist/ artifacts unchanged from US-005 (manifest
+    1.20 KB, popup / options / content / SW bundles same byte size
+    ±20 B — the new src/lib/llm/* tree is not yet imported by any
+    extension entry, by design — that wiring lands in US-011).
+  - `grep -rEi '\b(ats|crm|recruiter|recruiting|workflow|optitalent|
+    linkedin|indeed|naukri)\b' src/lib/llm` → 0 matches. §6.4 clean.
+  - `grep -rE 'eval\(|new Function\(' src/lib/llm` → 0 matches.
+- Codebase patterns established (promoted to top of progress.txt):
+  - LLM client topology: `client.ts` (transport / retry / timeout /
+    error mapping) + `adapters.ts` (per-provider request shaping) +
+    `errors.ts` (typed Error subclasses). Adding a non-OpenAI-shaped
+    provider in future = add one new builder in adapters.ts and one
+    entry in `ADAPTERS`; client.ts is provider-agnostic.
+  - Typed-error class convention: each subclass sets `this.name` in
+    its constructor (not via `override name = '...'`). Avoids the TS
+    `noImplicitOverride` interaction with Error's interface-declared
+    `name` field and works under
+    `exactOptionalPropertyTypes: true`.
+  - Test convention: tests live in `src/<area>/__tests__/*.test.ts`,
+    run via `npm test` (vitest run, single shot — no watch mode in
+    CI / quality-gate path). Vitest config is separate from vite
+    config and uses `decodeURIComponent(new URL(...).pathname)` to
+    resolve the `@` alias under repo paths with spaces.
+  - Injectable I/O for unit tests: any module that does fetch /
+    timeout work should accept `fetchImpl?: typeof fetch` +
+    `timeoutMs?: number` opts. Defaults preserve production
+    behaviour; tests inject vi.fn / mocked Response. No global fetch
+    monkey-patching; no msw needed for this codebase yet.
+  - Pre-display secret scrubber discipline: every thrown LLM error
+    message must be scrubbed via `scrubSecrets()` before construction.
+    Future stories that surface raw provider response bodies (e.g.
+    the in-page toast in US-011) MUST keep this invariant.
+- Notes / surprises:
+  - vitest 4.x ships with native ESM types and works under TS 5.9 +
+    moduleResolution=Bundler without any extra `types` entry in
+    tsconfig (vitest 3.x sometimes needed `types:["vitest/globals"]`
+    if you used globals — we don't; we explicit-import every helper).
+  - vitest installer flagged the same 2-high `rollup <2.80.0`
+    advisory previously seen in US-002 (transitively pulled in by
+    @crxjs/vite-plugin@2.4). Dev-only, build-time, and `npm audit
+    fix --force` would downgrade CRXJS to v1 — declined, consistent
+    with US-002's decision.
+  - The new client is intentionally *not yet wired* into the floating-
+    button → SW pipeline. US-011 ("End-to-end capture flow + download
+    trigger") owns that integration. Story-scoped commits per
+    CLAUDE.md §7.4: keep the LLM client landed and unit-tested but
+    untouched in extension bundles until its consumer story arrives.
+  - The OpenAI vision content-array shape (`content: [{type:'text'},
+    {type:'image_url'}]` rather than a single string) is now codified
+    in the request body the adapter emits. US-008's prompt builder
+    will compose `prompt` + the JSON-schema instruction text and pass
+    them as a single `prompt` argument; the adapter's text/html
+    concatenation stays untouched.
 
 ---
