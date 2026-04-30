@@ -21,5 +21,7 @@
   "background": {
     "service_worker": "src/background/service-worker.ts",
     "type": "module"
-  }
+  },
+  "options_page": "src/options/options.html",
+  "permissions": ["storage"]
 }

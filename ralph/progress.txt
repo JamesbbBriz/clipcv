@@ -49,6 +49,43 @@ Repo: <to-be-set-on-first-commit>
   `--load-extension` from CLI without policy/dev-mode, so automated
   unpacked-load is unreliable; the build artifacts + structural checks are
   the source of truth.
+- **Path alias under spaces**: the repo path `OptiTalent Nan V1/clipcv`
+  contains a space. `new URL('./src', import.meta.url).pathname` returns
+  the URL form (`%20`-encoded), which Rolldown can't resolve. Use
+  `decodeURIComponent(...)` (or `fileURLToPath` if `@types/node` is
+  available — currently it isn't) when wiring resolve.alias in
+  `vite.config.ts`.
+- **BYOK at-rest encryption** (`src/lib/crypto/byok-crypto.ts`): AES-GCM,
+  256-bit raw key generated once per install via
+  `crypto.subtle.generateKey({name:'AES-GCM', length:256}, true, ...)` and
+  exported as base64; per-call random 12-byte IV. The raw key, ciphertext
+  and IV all live in `chrome.storage.local` under the single key
+  `byok_settings` (see `src/lib/storage/byok-store.ts`). Plaintext API
+  key is never persisted. The module exports `generateRawKey`,
+  `encryptString`, `decryptString` only — no shared state, no module-scope
+  CryptoKey cache (the SW is killed between events).
+- **WebCrypto type variance**: under TS 5.7+ `Uint8Array` defaults to
+  `Uint8Array<ArrayBufferLike>`, but lib.dom's `crypto.subtle.encrypt`
+  signature requires `ArrayBuffer`-backed views. We allocate a fresh
+  `ArrayBuffer` copy via a small `toArrayBuffer(view)` helper at every
+  WebCrypto call site — see `byok-crypto.ts`. Future stories that touch
+  WebCrypto / fetch body should reuse this pattern.
+- **Secret scrubber** (`src/lib/util/scrub-secrets.ts`): single regex
+  pass over any string before display: `/sk-[A-Za-z0-9]{16,}/g` and
+  `/Bearer\s+[A-Za-z0-9._-]{20,}/g` → `[redacted]`. Apply in every
+  user-facing error path (per CLAUDE.md §6.2). The options page test-
+  connection error display already routes through it; reuse the same
+  helper from US-008 onwards when surfacing LLM errors.
+- **Manifest permissions**: stayed minimal. Only `"storage"` requested so
+  far (US-003). `<all_urls>` host permission lands with the content
+  script in US-004; downloads + activeTab in US-011. Each story adds the
+  narrowest required permission only.
+- **Options page entry** mirrors the popup convention:
+  `src/options/options.html` + `main.tsx` (createRoot bootstrap) +
+  `<Component>.tsx` (form). Wired through manifest's `options_page`
+  field. Tailwind imported via `options.css`. Future entry points
+  (content script in US-004) follow the same `main.tsx` +
+  `<Component>.tsx` split.
 
 ## Execution Order
 
@@ -213,5 +250,109 @@ US-001 → US-002 → US-003 → US-004 → US-005 → US-006 → US-007 → US-
     deprecated it for non-policy invocations starting Chrome 137).
     Documented; future UI verifications rely on structural checks +
     user manual reload in chrome://extensions.
+
+---
+
+## 2026-04-30 — US-003 — BYOK config page with encrypted local storage
+
+- Files changed:
+  - src/manifest.json: add `options_page: src/options/options.html` +
+    `permissions: ["storage"]` (narrowest grant — chrome.storage.local
+    requires `storage` permission in MV3).
+  - src/lib/crypto/byok-crypto.ts: new — `generateRawKey()` (256-bit
+    AES-GCM key, base64 raw export), `encryptString()` (12-byte random
+    IV per call), `decryptString()`. `toArrayBuffer(view)` helper
+    sidesteps the TS-5.7 `Uint8Array<ArrayBufferLike>` ↔ lib.dom
+    `BufferSource` variance.
+  - src/lib/storage/byok-store.ts: new — `loadByok()` / `saveByok()` /
+    `clearByok()`. Single chrome.storage.local key `byok_settings`
+    holds `{provider, baseUrl, model, output, apiKey:{ct,iv}, cryptoKey}`.
+    Reuses an existing `cryptoKey` so prior ciphertexts stay decryptable;
+    generates a new one only when none is present.
+  - src/lib/util/scrub-secrets.ts: new — regex-based scrubber for
+    `sk-[A-Za-z0-9]{16,}` and `Bearer\s+[A-Za-z0-9._-]{20,}`.
+  - src/lib/llm/test-connection.ts: new — POST `/chat/completions` with
+    `{model, max_tokens:1, messages:[{role:'user', content:'ping'}]}`,
+    15s AbortController timeout, returns
+    `{ok:true, latencyMs}` or `{ok:false, code, detail}` with code in
+    `auth_failed | timeout | model_not_found | bad_request |
+    rate_limited | unknown`. Detail is scrubbed + truncated to 500
+    chars before return.
+  - src/options/options.html: new — minimal MV3 doc, no inline script.
+  - src/options/main.tsx: new — React StrictMode entry, mounts
+    `<Options />`.
+  - src/options/Options.tsx: new — controlled form: provider preset
+    (OpenAI / OpenRouter / OpenAI-compatible custom), base URL, model,
+    API key (show/hide toggle), default output (pdf | docx | both),
+    Save + Test buttons, status banner. Validation: api_key required,
+    base URL must be http(s), model required.
+  - src/options/options.css: new — `@import 'tailwindcss';` + minimal
+    base styles.
+  - vite.config.ts: fix pre-existing alias bug — `URL.pathname` keeps
+    `%20` in paths with spaces, breaking Rolldown resolution. Replaced
+    with `decodeURIComponent(new URL('./src', import.meta.url).pathname)`.
+- Verification commands run:
+  - `npm run typecheck` → OK (tsc --noEmit clean under strict +
+    exactOptionalPropertyTypes + noUncheckedIndexedAccess).
+  - `npm run build` → dist/ produced:
+    - manifest.json (701 B) with options_page + permissions:[storage]
+    - dist/src/options/options.html (503 B) — `<script type="module">`
+      injected by Vite, no inline JS
+    - dist/assets/options-*.css (10.45 KB) — compiled Tailwind
+    - dist/assets/options.html-*.js (9.33 KB) — Options form module
+    - dist/assets/jsx-runtime-*.js (140.55 KB) — shared React (now
+      split out of the popup bundle since options.html-* and
+      popup.html-* both depend on it).
+    - service-worker / popup artifacts unchanged from US-002.
+  - Programmatic AC verifier (one-off node script, removed after run)
+    → 21/21 checks PASS:
+    1) manifest.options_page = src/options/options.html
+    2) manifest.permissions includes "storage"
+    3) dist/src/options/options.html exists with non-zero size
+    4) options.html has #root
+    5) options.html has type=module external script
+    6) options.html has no inline executable script body
+    7) bundle references AES-GCM
+    8) bundle references chrome.storage.local key 'byok_settings'
+    9) bundle references /chat/completions
+    10–12) bundle has provider preset openai/openrouter/custom
+    13) bundle has output preset pdf/docx/both
+    14) bundle has all 6 typed error codes
+    15) bundle has [redacted] scrubber output
+    16) bundle has 'Test connection' label
+    17) no eval(...) in any dist artifact
+    18) no new Function(...) in any dist artifact
+    19) no §6.4 forbidden copy in src/
+    20) WebCrypto AES-GCM round-trip works in this runtime
+    21) scrubber regexes (sk- and Bearer) present in bundle
+  - Forbidden-pattern grep for §6.4 downstream copy
+    (ats|crm|recruiter|recruiting|matching|workflow|optitalent) over
+    src/options + src/lib → 0 matches.
+  - Browser unpacked load: same Chrome 137+ CLI limitation as US-002;
+    structural checks above cover every observable AC condition.
+- Codebase patterns established (promoted to top of progress.txt):
+  - BYOK encryption module + chrome.storage.local layout.
+  - WebCrypto `toArrayBuffer(view)` helper for TS-5.7 type variance.
+  - Secret scrubber for any user-facing error path.
+  - Vite alias under repo paths with spaces — use decodeURIComponent.
+  - Options page entry naming follows the popup convention
+    (`main.tsx` + `<Component>.tsx`).
+  - Manifest permissions stay minimal; each story adds only what it
+    needs.
+- Notes / surprises:
+  - vite.config.ts alias bug pre-existed but only surfaced when this
+    story added the first `@/...` import (popup files use only
+    relative imports). Single-line fix; no new dependencies.
+  - `@types/node` is intentionally absent — sticking with browser
+    types only. Used `decodeURIComponent` over `node:url`.
+  - Linting: no ESLint config exists yet (US-001/US-002 same), so the
+    §7.2 lint step is a no-op this iteration. ESLint wiring is out
+    of scope; future story (or US-013 doc/CI work) should land it.
+  - Per-call random 12-byte IV is regenerated on every save, so
+    re-saving the same plaintext produces a different ciphertext — by
+    design (AES-GCM IV reuse with the same key would be catastrophic).
+  - The cryptoKey is reused across saves so old encrypted state
+    remains decryptable; rotation lands with the explicit "revoke
+    acceptance" path in US-012 / US-003-revisit (future).
 
 ---

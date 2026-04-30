@@ -63,8 +63,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Options page wired via manifest.options_page + storage permission. WebCrypto AES-GCM module (src/lib/crypto/byok-crypto.ts) generates a per-install 256-bit raw key on first save and reuses it; ciphertext + IV + raw key all live in chrome.storage.local under 'byok_settings'. Plaintext API key never persisted. src/lib/storage/byok-store.ts encapsulates load/save/clear. Test connection helper (src/lib/llm/test-connection.ts) issues a 1-token /chat/completions POST with 15s timeout and maps status → typed error code (auth_failed / timeout / model_not_found / bad_request / rate_limited / unknown). src/lib/util/scrub-secrets.ts scrubs sk-*/Bearer-* before display. Form validates non-empty API key + http(s) base URL + non-empty model. Build emits dist/manifest.json with options_page + permissions:[storage], dist/src/options/options.html (no inline JS), dist/assets/options.html-*.js (9.33 KB) + jsx-runtime-*.js (140 KB shared). 21/21 programmatic AC checks PASS; no eval / new Function / inline scripts in dist; §6.4 forbidden-copy grep over src/options + src/lib clean. Also fixed a pre-existing vite.config.ts alias bug (URL.pathname kept %20 in repo paths with spaces) by decodeURIComponent — required to make @/* alias resolve under 'OptiTalent Nan V1/clipcv'."
     },
     {
       "id": "US-004",
