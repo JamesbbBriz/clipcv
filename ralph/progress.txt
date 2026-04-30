@@ -295,6 +295,51 @@ Repo: <to-be-set-on-first-commit>
   identical now produces byte-identical PDFs) and in the YYYYMMDD
   filename. Tests pin `now`; the live extension passes
   `new Date()` (default). DOCX in US-010 follows the same shape.
+- **DOCX renderer topology** (`src/lib/render/docx.ts`): `docx@9.x`
+  + `Document` + `Paragraph` + `TextRun` + `HeadingLevel`. Builder
+  helpers (`makeHeader`, `makeSectionHeading`, `makeBodyParagraph`,
+  `makeExperience`, `makeEducation`, `makeListSection`, `buildBody`)
+  produce flat `Paragraph[]` arrays which `buildBody` concatenates
+  in the same section order as the PDF renderer. Body text is sized
+  in half-points (`size: 22` = 11pt; `28` = 14pt heading; `40` = 20pt
+  name). Bullet indent is twips (`360` ≈ 0.25in). Empty optional
+  sections are skipped via `.length > 0` / truthy guards — same
+  invariant as the PDF renderer. A trailing empty paragraph is
+  appended to the section so list-only documents end with a
+  well-formed terminator.
+- **DOCX serialization across env**: `Packer.toBlob(doc) → Blob →
+  blob.arrayBuffer() → new Uint8Array(ab)` works in BOTH the MV3
+  service worker (browser Blob is built-in) AND vitest's node>=18
+  env (global Blob with `.arrayBuffer()` is available since Node 18,
+  no polyfill required). `Packer.toBuffer` is Node-only because it
+  pipes jszip into a Buffer; do NOT use it — it breaks the browser
+  bundle. The `bytes: Uint8Array` shape matches the PDF renderer.
+- **DOCX byte signature**: DOCX is a ZIP container; the magic is
+  `PK\\x03\\x04` (`50 4B 03 04`). Tests assert this magic plus
+  `bytes.byteLength > 0`. To inspect XML inside the ZIP without
+  extra deps, dynamic-import jszip (already a transitive dep of
+  `docx`) — `JSZip.loadAsync(bytes)` → `zip.file('word/document.xml').
+  async('string')`. Useful for asserting that section labels and
+  optional-section gating actually rendered.
+- **Output dispatcher** (`src/lib/render/dispatch.ts`):
+  `renderForOutput(profile, output, opts)` reads the BYOK store's
+  `OutputFormat` (`'pdf' | 'docx' | 'both'`) and returns
+  `RenderedFile[]` with `{bytes, filename, mimeType}`. Single source
+  of truth that maps the settings selector to renderer invocations;
+  US-011 imports this to honour the user's choice from the floating-
+  button click handler. Order is pdf-then-docx for `'both'` (matches
+  the AC-defined section ordering of "PDF or DOCX or both").
+  MIME types: `application/pdf` and the openxml word document type.
+  Pass `{ now }` through to keep determinism in tests; default
+  resolves to `new Date()`.
+- **`exactOptionalPropertyTypes` + opts forwarding**: when forwarding
+  a possibly-undefined `now` field into a renderer's `opts`, do NOT
+  pass `{ now: options.now }` because TS rejects an explicit
+  `undefined`. Use `options.now ? { now: options.now } : {}` (or
+  conditional spread). Same trick used for `responseFormatJson` in
+  US-008's adapter — promote this once more to a general "never
+  pass `field: undefined`" rule for forwards under
+  `exactOptionalPropertyTypes:true`.
 
 ## Execution Order
 
@@ -1194,5 +1239,101 @@ US-001 → US-002 → US-003 → US-004 → US-005 → US-006 → US-007 → US-
     same object table for identical input). Useful for future
     snapshot-style tests; the AC only required magic-header +
     non-zero size, which is what `pdf.test.ts` covers.
+
+---
+
+## 2026-04-30 — US-010 — DOCX renderer
+
+- Files changed:
+  - package.json + package-lock.json: add runtime dep `docx@9.6.1`
+    (deterministic, MIT, browser-compatible — works in MV3 service
+    workers AND vitest's `node` env via global Blob since Node 18).
+    Transitive runtime deps pulled in: `jszip@3`, `nanoid@5`,
+    `xml-js@1`, `xml@1`, `hash.js@1`. The `@types/node` declared in
+    docx's runtime `dependencies` is for type augmentation only;
+    Vite tree-shakes the bundle for browser.
+  - src/lib/render/docx.ts: new — `renderDocx(profile, opts) ->
+    {bytes:Uint8Array, filename:string}`. Builder helpers produce
+    flat `Paragraph[]` for each section in the same order as the
+    PDF renderer; `buildBody` concatenates and gates each optional
+    section on a populated check (no empty headings on minimal
+    profiles). Half-points sizing (40 name / 28 heading / 22 body),
+    twips bullet indent (360). `Packer.toBlob(doc)` →
+    `blob.arrayBuffer()` → `Uint8Array` is the browser+node-portable
+    serialization path. Filename via shared
+    `formatFilename(name, now, 'docx')`. 249 LOC (under §9 300).
+  - src/lib/render/dispatch.ts: new — `renderForOutput(profile,
+    output, opts)` reads the BYOK store's `OutputFormat`
+    (`'pdf' | 'docx' | 'both'`) and returns `RenderedFile[]` with
+    `{bytes, filename, mimeType}` per file. Single source of truth
+    that wires the settings selector to renderer dispatch. 48 LOC.
+  - src/lib/render/__tests__/docx.test.ts: new — 6 specs covering
+    golden-fixture ZIP magic (`PK\\x03\\x04` = `50 4b 03 04`) +
+    size>0, filename pattern `Doe_Jane_20260430.docx`,
+    minimal-name-only profile, Unknown-literal-name passthrough,
+    JSZip crack-open of `word/document.xml` asserting Jane Doe +
+    Heading2 + each section label rendered, minimal-profile assert
+    NO empty section headings emitted.
+  - src/lib/render/__tests__/dispatch.test.ts: new — 4 specs:
+    `output='pdf'` emits 1 PDF (`application/pdf`), `output='docx'`
+    emits 1 DOCX (openxml word mime), `output='both'` emits 2 files
+    in pdf-then-docx order, options.now omission falls back to
+    `new Date()` with YYYYMMDD bracketed by before/after stamps.
+- Verification commands run:
+  - `npm install docx@9.6.1` → 21 packages added (docx + jszip +
+    nanoid + xml + xml-js + hash.js + transitives). Same prior
+    `rollup <2.80.0` advisory inherited from CRXJS persists;
+    documented in US-002, no force-fix.
+  - `npm run typecheck` → OK (tsc --noEmit clean under strict +
+    exactOptionalPropertyTypes + noUncheckedIndexedAccess).
+  - `npm test` → vitest 4.1.5; **7 test files, 58/58 tests passed**
+    in 420 ms (10 new = 6 docx + 4 dispatch; 48 prior).
+  - `npm run build` → dist/ produced (manifest 1.20 KB; popup /
+    options / SW bundles unchanged byte-for-byte from US-009;
+    `inject.tsx-*.js` shifted +60 B due to build-hash variance —
+    `src/lib/render/*` is NOT yet imported by any extension entry,
+    by design — wiring lands in US-011).
+  - §6.4 forbidden-copy grep
+    (`ats|crm|recruiter|recruiting|workflow|optitalent|linkedin|
+    indeed|naukri`) over `src/lib/render` → 0 matches.
+  - `eval(` / `new Function(` over `src/lib/render` → 0 matches.
+- Codebase patterns established (promoted to top of progress.txt):
+  - DOCX renderer topology + builder-helper pattern.
+  - DOCX serialization across env (`Packer.toBlob` → arrayBuffer →
+    Uint8Array works in MV3 SW + Node 18+).
+  - DOCX byte signature `PK\\x03\\x04` and JSZip-based
+    `word/document.xml` inspection trick (no extra dep — jszip is
+    already transitive through docx).
+  - Output dispatcher pattern + RenderedFile shape with mimeType.
+  - Conditional-spread for `exactOptionalPropertyTypes:true` opts
+    forwarding (already noted for `responseFormatJson` in US-008;
+    promoted to a general rule).
+- Notes / surprises:
+  - First reflex on the AC "Settings selector controls which
+    renderer(s) run on capture" was to wire it directly into the
+    floating button's click handler. Held back per §1 minimum
+    blast radius — the floating-button click pipeline lives in
+    US-011's scope. Instead landed a single-purpose
+    `renderForOutput` dispatcher that respects the existing
+    `OutputFormat` from US-003 and is ready for US-011 to import
+    in one line. Story-scoped commit invariant preserved.
+  - `docx@9.6.1` declares `@types/node@^25` in its runtime
+    `dependencies` (not devDependencies). Surprised but harmless:
+    Vite tree-shakes types out of the runtime bundle, and the
+    transitive `node_modules/@types/node` install is dev-time only
+    from the bundler's view.
+  - Considered using `Packer.toBuffer(doc)` for symmetry with
+    `pdf.save()` but that path is Node-only (jszip → nodebuffer)
+    and would break the browser bundle. The Blob path is portable
+    and the test code is identical to what production runs.
+  - The bullet indent uses twips (360 ≈ 0.25in) instead of the
+    PDF renderer's 12pt indent — DOCX paragraphs are
+    indent-property-driven rather than positioned; the visual
+    result is comparable.
+  - One test asserts the filename when name is the literal string
+    "Unknown" (no special-casing — the sanitiser passes "Unknown"
+    through as-is, so the filename ends up
+    `Unknown_20260430.docx`). Documents the "Unknown" fallback
+    is for missing/empty inputs, not a reserved word.
 
 ---
