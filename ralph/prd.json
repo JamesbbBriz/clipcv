@@ -1,0 +1,274 @@
+{
+  "project": "clipcv",
+  "branchName": "ralph/clipcv-mvp",
+  "description": "Open-source Chrome extension that converts a single profile page into a clean PDF or DOCX file via the user's own Vision LLM API key (BYOK). Manifest V3, MIT-licensed. The extension runs entirely in the user's browser; the project operates no server. The extension is a generic page-to-document converter — it does not target any specific website, does not include site-specific selectors, and does not specify a destination for the produced file. What the user does with the file after it downloads is outside the project's scope.",
+  "globalQualityGates": [
+    "Story-scoped commits — no unrelated files staged.",
+    "Verify build outputs in dist/ before passes=true.",
+    "Manifest V3 compliant: no inline scripts, no eval, no remote code execution, MV3 service worker pattern.",
+    "TypeScript strict mode; no `any` outside controlled boundaries.",
+    "BYOK keys never leave the user's browser to a third-party server controlled by this project. Encryption at rest in chrome.storage.local via WebCrypto AES-GCM.",
+    "No site-specific selectors, no target-website list, no hardcoded URL allowlist beyond `<all_urls>`. The extraction is a pure prompt-driven Vision LLM call.",
+    "No copy or marketing language anywhere (README / DISCLAIMER / PRIVACY / store listing / popup UI / extracted-file metadata) directs the user toward any specific destination platform, ATS, CRM, or service.",
+    "UI stories visually verified by loading dist/ as unpacked extension."
+  ],
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Vite + CRXJS + React + TS scaffold",
+      "description": "As a maintainer, I need a working dev environment with hot-reload so I can iterate fast.",
+      "acceptanceCriteria": [
+        "package.json with vite + @crxjs/vite-plugin + react + react-dom + typescript + zod",
+        "tsconfig.json strict mode + DOM lib + chrome types",
+        "vite.config.ts wires CRXJS plugin pointing at src/manifest.json",
+        "src/manifest.json declares Manifest V3 with name 'clipcv' / version 0.1.0 / icons placeholder",
+        "npm run dev starts dev server with HMR",
+        "npm run build emits dist/ with manifest.json + bundled scripts",
+        "dist/ loads in chrome://extensions as unpacked without errors",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Popup UI shell + service worker hello world",
+      "description": "Extension toolbar icon opens a popup with a placeholder UI; background service worker logs lifecycle events.",
+      "acceptanceCriteria": [
+        "src/popup/popup.html + popup.tsx render a minimal Tailwind shell with name + a disabled placeholder Capture button",
+        "src/background/service-worker.ts logs install/activate/runtime events at debug level",
+        "manifest.json action.default_popup points at popup.html",
+        "manifest.json background.service_worker points at the compiled service-worker file",
+        "Popup opens on toolbar click and shows the shell",
+        "Typecheck passes",
+        "Verify in browser by loading unpacked"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "BYOK config page with encrypted local storage",
+      "description": "User enters LLM provider, base URL, model, and API key. Stored encrypted at rest in chrome.storage.local.",
+      "acceptanceCriteria": [
+        "Settings page (chrome://options for clipcv) with fields: provider (preset list + 'OpenAI-compatible custom'), base_url, model, api_key, default output format (pdf | docx | both)",
+        "API key encrypted with WebCrypto AES-GCM using a random 256-bit key per install (key + IV stored alongside ciphertext in chrome.storage.local; key never sent over the network)",
+        "chrome.storage.local persists ciphertext + IV + the encryption key; never stores plaintext api_key",
+        "Form validation: api_key required, base_url is a URL",
+        "'Test connection' button: a 1-token completion call returning latency_ms or a typed error code (auth_failed / timeout / model_not_found / bad_request / rate_limited / unknown)",
+        "Test errors masked of any text matching `sk-[A-Za-z0-9]{16,}` or `Bearer [A-Za-z0-9._-]{20,}` patterns before display",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Floating Capture button content script injection",
+      "description": "Inject a small floating button so the user can click it to start capture on the current page.",
+      "acceptanceCriteria": [
+        "src/content/inject.tsx mounts a shadow-DOM root with a floating button anchored bottom-right",
+        "manifest.json content_scripts matches `<all_urls>`",
+        "Idempotent: button never re-injects if shadow root already exists",
+        "Shadow DOM isolates styling so host page CSS does not bleed in or out",
+        "Click sends a typed message to background/service-worker via chrome.runtime.sendMessage with the active tab's URL",
+        "Hidden when disclaimer not yet accepted (gated by US-012)",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Capture viewport screenshot + visible DOM HTML",
+      "description": "On Capture click, snapshot the viewport and serialize the visible DOM tree.",
+      "acceptanceCriteria": [
+        "service worker handles capture-request message",
+        "Calls chrome.tabs.captureVisibleTab() → base64 PNG (downsample to <= 1280px width to control LLM token cost)",
+        "Sends back to content script which serializes document.body.innerHTML stripped of `<script>` / `<style>` / `<noscript>` and any element with attribute `aria-hidden=\"true\"`",
+        "Returns {screenshot_b64, html, page_url, page_title, captured_at} payload",
+        "Total payload size capped at 1MB; over the cap, drops DOM and uses screenshot only",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Vision LLM provider abstraction",
+      "description": "Single client supporting any OpenAI-compatible Vision API.",
+      "acceptanceCriteria": [
+        "src/lib/llm/client.ts: callVisionLLM({provider, baseUrl, apiKey, model, screenshot_b64, html, prompt}) → string",
+        "OpenAI-compatible /chat/completions with vision messages array (image_url base64 + text)",
+        "Default timeout 30s; one retry on 5xx; no retry on 4xx",
+        "Provider-specific quirks isolated in adapter layer (each adapter exports the same signature)",
+        "Returns the raw assistant content string; parsing is downstream",
+        "Throws typed Error subclasses: AuthError, TimeoutError, RateLimitedError, BadRequestError, UnknownLlmError",
+        "Unit tests cover happy path + timeout + auth error + rate limit",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Zod schema for ExtractedProfile",
+      "description": "Strict schema for the structured profile data the model returns.",
+      "acceptanceCriteria": [
+        "src/lib/schema/profile.ts exports a z.object: name, email?, phone?, current_title?, current_company?, location?, summary?, experiences[], educations[], skills[], certifications[], languages[]",
+        "experiences[] item: {company, title, start_date?, end_date?, location?, bullets: string[]}",
+        "educations[] item: {institution, degree?, field?, start_date?, end_date?, location?}",
+        "All date fields are free-form strings (model returns whatever the page shows; we do not normalize)",
+        "Schema rejects unknown top-level keys; required minimum is `name`",
+        "Export type ExtractedProfile = z.infer<typeof schema>",
+        "Unit tests with golden fixture pass",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Vision extraction prompt + JSON validation pipeline",
+      "description": "Compose the LLM prompt requesting Zod-shaped JSON, validate the response, return ExtractedProfile or a typed error.",
+      "acceptanceCriteria": [
+        "src/lib/extract/vision-extract.ts: extractProfile({screenshot_b64, html}) → ExtractedProfile",
+        "Prompt instructs the model to ignore navigation/ads/footer/sidebar and only output the primary subject's structured data",
+        "Prompt requests `response_format: json_object` (and includes JSON schema text for providers that ignore the API field)",
+        "Zod validates the response; on parse failure, retry once with a stricter prompt that includes the schema again",
+        "Errors surfaced as typed: AUTH | TIMEOUT | NO_PROFILE_DETECTED | SCHEMA_MISMATCH | UNKNOWN_LLM",
+        "Unit tests with golden fixture: parse success, schema mismatch, no profile detected",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "PDF renderer",
+      "description": "Render an ExtractedProfile to a clean PDF.",
+      "acceptanceCriteria": [
+        "src/lib/render/pdf.ts uses pdf-lib (deterministic, no external server)",
+        "Page size: A4. Single font family (Helvetica). Body 11pt, section heading 14pt bold",
+        "Content order: Header (name + contact) → Summary → Experience → Education → Skills → Certifications → Languages",
+        "Optional sections omitted entirely when empty (no empty headings)",
+        "Filename: `{LastFirst_or_Unknown}_{YYYYMMDD}.pdf`",
+        "Unit test produces a valid PDF for the fixture and asserts non-zero byte size and PDF magic header",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "DOCX renderer",
+      "description": "Same data → DOCX. User picks PDF / DOCX / both in settings.",
+      "acceptanceCriteria": [
+        "src/lib/render/docx.ts uses the `docx` npm package",
+        "Same content order as PDF (US-009)",
+        "Settings selector controls which renderer(s) run on capture",
+        "Filename convention identical to PDF, .docx extension",
+        "Unit test produces a valid DOCX with non-zero size",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "End-to-end capture flow + download trigger",
+      "description": "Click button → spinner → extract → render → download.",
+      "acceptanceCriteria": [
+        "Floating button click runs the full pipeline with a loading state and a Cancel option",
+        "On success, chrome.downloads.download triggers the browser's save dialog",
+        "On error, an in-page toast surfaces a user-friendly message keyed off the error enum (no raw stack traces, no API key fragments)",
+        "Pipeline completes under 30s on average for a typical profile page",
+        "If both PDF and DOCX selected, both files download (browser save dialog twice)",
+        "Verify end-to-end on a sample profile page (e.g. a public blog 'About the author' page)",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Install-time disclaimer modal + accept gate",
+      "description": "First launch shows a ToS-compliance disclaimer; the user must accept before the extension is operational.",
+      "acceptanceCriteria": [
+        "Modal shown on first install AND on first popup-open after each version bump where DISCLAIMER.md changed",
+        "Modal text matches DISCLAIMER.md verbatim (single source of truth: bundle the markdown into the build)",
+        "Accept button stores `{accepted: true, version: <manifest.version>, accepted_at: ISO timestamp}` in chrome.storage.local",
+        "Floating button (US-004) is no-op until acceptance flag is set for the current manifest version",
+        "User can revoke acceptance from the settings page (which deletes the flag and re-shows the modal)",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "Public-facing docs + Chrome Web Store assets",
+      "description": "README, license, privacy policy, disclaimer, store listing copy, screenshots, and icons ready for store submission.",
+      "acceptanceCriteria": [
+        "README.md covers: feature list, install, BYOK setup, link to DISCLAIMER and PRIVACY, contributing notes",
+        "README, DISCLAIMER, PRIVACY: no copy that names a specific destination service, ATS, CRM, or workflow. The tool produces a file; what the user does with it is outside the docs.",
+        "LICENSE = MIT",
+        "PRIVACY.md is GitHub-Pages-renderable",
+        "public/icons/16.png + 48.png + 128.png at the correct dimensions",
+        "docs/store-listing.md: short description (≤132 chars), long description, 5 screenshot specs, 30s demo video script. None of these documents mention a specific website by name beyond generic descriptions.",
+        "Typecheck passes"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "Build + package pipeline scripts",
+      "description": "npm run package produces a store-ready zip and a signed crx for GitHub Release.",
+      "acceptanceCriteria": [
+        "scripts/package.sh: vite build → zip dist/ → release/clipcv-v{version}.zip and release/clipcv-v{version}.crx",
+        "Reads or generates a PEM key from env CRX_PRIVATE_KEY; the PEM never enters git (.gitignore enforced)",
+        "Filenames include manifest version",
+        "Pre-flight check fails the build if manifest version was not bumped since the previous git tag",
+        "Typecheck passes"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "GitHub Actions: tag → build → Release",
+      "description": "Pushing a v* git tag triggers CI to build and publish artifacts to a GitHub Release.",
+      "acceptanceCriteria": [
+        ".github/workflows/release.yml triggers on `push: tags: ['v*']`",
+        "Steps: checkout, setup-node 20, npm ci, npm run build, npm run package, gh release create with the .zip and .crx attached",
+        "CRX_PRIVATE_KEY consumed from a repo secret",
+        "Smoke run: tagging v0.0.1-test produces a draft release with both artifacts",
+        "README documents the release flow",
+        "Typecheck passes"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

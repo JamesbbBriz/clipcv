@@ -1,0 +1,41 @@
+# Ralph Progress Log — clipcv MVP
+# Branch: ralph/clipcv-mvp
+Started: Wed Apr 30 04:30:00 CST 2026
+Repo: <to-be-set-on-first-commit>
+
+## Codebase Patterns (will accumulate as work lands)
+
+(none yet — fresh repo)
+
+## Execution Order
+
+US-001 → US-002 → US-003 → US-004 → US-005 → US-006 → US-007 → US-008
+→ US-009 → US-010 → US-011 → US-012 → US-013 → US-014 → US-015
+
+## Hard rules for every story (enforced via globalQualityGates)
+
+1. Manifest V3 compliance — no inline scripts, no eval, no remote code,
+   service worker pattern.
+
+2. BYOK keys never leave the user's browser to any project-controlled
+   server. WebCrypto AES-GCM at rest in chrome.storage.local.
+
+3. No site-specific selectors. No hardcoded URL allowlist beyond
+   `<all_urls>`. Extraction is a pure prompt-driven Vision LLM call.
+   The extension does not "target" any platform — it is a generic
+   page-to-document tool.
+
+4. No copy in the codebase, README, DISCLAIMER, PRIVACY, popup UI,
+   settings page, store listing, demo video, or extracted-file metadata
+   may direct the user toward any specific destination service, ATS,
+   CRM, or workflow. The tool produces a file; what the user does with
+   it is outside the project's scope.
+
+5. Story-scoped commits. No unrelated files in any commit.
+
+6. UI stories visually verified by loading dist/ as unpacked extension
+   before passes=true.
+
+---
+
+(per-story log entries appended below as iterations land)
