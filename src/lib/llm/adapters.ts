@@ -14,6 +14,8 @@ export interface AdapterInput {
   screenshot_b64: string;
   html: string;
   prompt: string;
+  /** When true, request OpenAI-style structured JSON output. */
+  responseFormatJson?: boolean;
 }
 
 export interface AdapterRequest {
@@ -28,7 +30,7 @@ const buildOpenAICompatibleRequest: Adapter = (input) => {
   const userText = input.html
     ? `${input.prompt}\n\nVisible HTML excerpt:\n${input.html}`
     : input.prompt;
-  const body = JSON.stringify({
+  const payload: Record<string, unknown> = {
     model: input.model,
     messages: [
       {
@@ -42,7 +44,11 @@ const buildOpenAICompatibleRequest: Adapter = (input) => {
         ],
       },
     ],
-  });
+  };
+  if (input.responseFormatJson) {
+    payload.response_format = { type: 'json_object' };
+  }
+  const body = JSON.stringify(payload);
   return {
     url: joinUrl(input.baseUrl, '/chat/completions'),
     headers: {

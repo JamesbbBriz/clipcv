@@ -211,6 +211,46 @@ Repo: <to-be-set-on-first-commit>
   undefined values) and fine for upstream code that conditionally
   spreads. No special handling needed beyond avoiding `field:
   undefined` literals.
+- **Vision extraction pipeline** (`src/lib/extract/vision-extract.ts`):
+  single entry `extractProfile({provider, baseUrl, apiKey, model,
+  screenshot_b64, html, timeoutMs?, callImpl?, fetchImpl?}) →
+  ExtractedProfile`. Two-attempt loop (base prompt → strict retry on
+  parse failure), `responseFormatJson:true` flag flowed end-to-end to
+  the adapter, schema text inlined in the prompt for providers that
+  ignore the API field, and a `{"_no_profile": true}` sentinel to
+  short-circuit "this page is not a profile" → `NO_PROFILE_DETECTED`.
+  `callImpl?` is the test seam — defaults to `callVisionLLM`; tests
+  inject a `vi.fn` and never touch HTTP.
+- **`ExtractError` shape** (`src/lib/extract/vision-extract.ts`):
+  single class with a `code: ExtractErrorCode` (`AUTH | TIMEOUT |
+  NO_PROFILE_DETECTED | SCHEMA_MISMATCH | UNKNOWN_LLM`) — flatter
+  than the 5-subclass pattern in `llm/errors.ts` because the AC
+  enumerates codes, not types, and downstream UI in US-011 will
+  switch on `error.code`. Mapping from LLM transport errors:
+  `AuthError → AUTH`, `TimeoutError → TIMEOUT`, everything else
+  (incl. `RateLimitedError` and `BadRequestError`) → `UNKNOWN_LLM`.
+- **`responseFormatJson` flag**: optional flag added to both
+  `AdapterInput` and `CallVisionLLMInput`. Under
+  `exactOptionalPropertyTypes:true` the propagation must be a
+  conditional spread (`...(input.responseFormatJson === true ?
+  { responseFormatJson: true } : {})`) — never `{ responseFormatJson:
+  input.responseFormatJson }` because passing an explicit `undefined`
+  is a TS error. Adapter only emits `response_format:{type:'json_object'}`
+  in the body when the flag is `true`.
+- **Loose JSON parser** (`parseJsonLoose` in `vision-extract.ts`):
+  tries `JSON.parse(content)` first; on failure tries with surrounding
+  ```` ```json ... ``` ```` code fences stripped; on failure tries the
+  first `{...}` block (`indexOf('{')..lastIndexOf('}')`). Returns
+  `undefined` only if all three fail. Future stories that consume LLM
+  free-text output (e.g. translation, summary tasks) can reuse this
+  helper if they get its own home — keep it scoped to the extract
+  module for now.
+- **Zod 4 issue.path PropertyKey type**: `issue.path` is
+  `PropertyKey[]` (`string | number | symbol`), not just
+  `(string | number)[]` like zod 3. When stringifying issue paths,
+  use `path.map(String).join('.')`. Plain `path.join('.')` typechecks
+  on zod 3 but fails on zod 4 because `Array<symbol>.join` is
+  rejected.
 
 ## Execution Order
 
@@ -930,5 +970,91 @@ US-001 → US-002 → US-003 → US-004 → US-005 → US-006 → US-007 → US-
   - The schema file lives entirely outside any chrome.* / DOM API,
     same as `src/lib/llm/`, so it parses fine in the vitest node
     environment without DOM polyfills.
+
+---
+
+## 2026-04-30 — US-008 — Vision extraction prompt + JSON validation pipeline
+
+- Files changed:
+  - src/lib/extract/vision-extract.ts: new — `extractProfile(input)
+    → Promise<ExtractedProfile>`. Two-attempt loop (base prompt →
+    strict retry on JSON / schema parse failure). Inlines the
+    schema text in the prompt so providers that ignore
+    `response_format` still receive the contract. Sentinel
+    `{"_no_profile": true}` short-circuits to
+    `ExtractError('NO_PROFILE_DETECTED', ...)`. `parseJsonLoose`
+    handles raw JSON / `\`\`\`json\`\`\`` code fences / prose-wrapped
+    `{...}`. LLM transport-error mapping: `AuthError → AUTH`,
+    `TimeoutError → TIMEOUT`, everything else (RateLimited /
+    BadRequest / Unknown) → `UNKNOWN_LLM`. Two-strikes parse failure
+    → `ExtractError('SCHEMA_MISMATCH', summary)` with up to 5 zod
+    issues summarised. `callImpl?` is the test seam (defaults to
+    `callVisionLLM`).
+  - src/lib/extract/__tests__/vision-extract.test.ts: new — 14 tests
+    covering golden-fixture happy path, code-fence strip, embedded-
+    block extract, NO_PROFILE_DETECTED sentinel, retry-on-non-JSON
+    recovery, two-failure SCHEMA_MISMATCH, missing-name SCHEMA_MISMATCH,
+    unknown-top-level-key strict rejection, AUTH/TIMEOUT/RateLimited→
+    UNKNOWN_LLM/UnknownLlmError mapping, responseFormatJson +
+    creds + timeoutMs pass-through, base-prompt structural assertions
+    (navigation/ads?/footer/sidebar/_no_profile/experiences/educations).
+  - src/lib/llm/adapters.ts: extend `AdapterInput` with optional
+    `responseFormatJson?: boolean`; `buildOpenAICompatibleRequest`
+    now emits `response_format:{type:'json_object'}` in the request
+    body only when the flag is `true`.
+  - src/lib/llm/client.ts: extend `CallVisionLLMInput` with optional
+    `responseFormatJson?: boolean`; conditional-spread propagation
+    to the adapter to satisfy `exactOptionalPropertyTypes:true`.
+- Verification commands run:
+  - `npm run typecheck` → OK (tsc --noEmit clean under strict +
+    exactOptionalPropertyTypes + noUncheckedIndexedAccess).
+  - `npm test` → vitest 4.1.5; **3 test files, 35/35 tests passed**
+    in 242 ms (14 new extract specs + 13 LLM-client specs from
+    US-006 + 8 schema specs from US-007).
+  - `npm run build` → dist/ produced (manifest 1.20 KB; popup /
+    options / content / SW bundles unchanged byte-for-byte from
+    US-007 — the new `src/lib/extract/*` is not yet imported by any
+    extension entry, by design — wiring lands in US-011).
+  - `grep -rEi '\b(ats|crm|recruiter|recruiting|workflow|optitalent|
+    linkedin|indeed|naukri)\b' src/lib/extract` → 0 matches. §6.4
+    clean. (First draft of the prompt said "recruiter contact info"
+    as a "do NOT extract" example; reworded to "embedded contact-
+    form fields for unrelated parties" to keep the convention's
+    grep at 0 matches.)
+  - `grep -rE 'eval\(|new Function\(' src/lib/extract` → 0 matches.
+- Codebase patterns established (promoted to top of progress.txt):
+  - Vision extraction pipeline topology (single entry, two-attempt
+    loop, schema text inlined in prompt, JSON sentinel for "no
+    profile").
+  - `ExtractError` flat-code shape + LLM-error mapping rules.
+  - `responseFormatJson` adapter / client flag plumbing under
+    `exactOptionalPropertyTypes:true`.
+  - Loose JSON parser (direct → fence-stripped → first-`{...}`-block).
+  - Zod 4 `issue.path` is `PropertyKey[]` (incl. `symbol`); use
+    `.map(String).join('.')` to stringify.
+- Notes / surprises:
+  - First typecheck failed because zod 4 widened `issue.path` from
+    `(string|number)[]` to `PropertyKey[]` (now includes `symbol`).
+    Plain `path.join('.')` no longer typechecks. Fixed with
+    `path.map((p) => String(p)).join('.')`. Captured as a codebase
+    pattern.
+  - Considered modelling the typed errors as 5 subclasses (matching
+    `llm/errors.ts`) but the AC enumerates *codes* not types and
+    US-011's UI will pattern-match on `.code`. A single `ExtractError`
+    + `code` enum is smaller blast radius and idiomatic for the
+    consumer surface. The `instanceof ExtractError` check + `.code`
+    switch is what US-011 should use.
+  - Kept `extractProfile` un-wired into any extension entry. US-011
+    (E2E capture flow) is the consumer story; landing the pipeline
+    here unbundled keeps the dist artifact diff at zero and respects
+    story-scoped commits per CLAUDE.md §7.4.
+  - `responseFormatJson` is a feature flag at the call site, not a
+    default-on. The OpenAI-compatible API field is widely supported
+    but not universal; passing the schema text inline in the prompt
+    (per the AC) is the safety net for providers that ignore the
+    field. Setting the flag also signals intent for adapters that
+    might switch transport (e.g. a future Anthropic adapter would
+    use a different mechanism — `tool_use` with a JSON schema —
+    for the same intent).
 
 ---

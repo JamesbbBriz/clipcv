@@ -29,6 +29,8 @@ export interface CallVisionLLMInput {
   screenshot_b64: string;
   html: string;
   prompt: string;
+  /** When true, request OpenAI-style structured JSON output. */
+  responseFormatJson?: boolean;
   /** Override the 30s default. */
   timeoutMs?: number;
   /** Test-only injectable fetch implementation. */
@@ -44,6 +46,7 @@ export async function callVisionLLM(input: CallVisionLLMInput): Promise<string> 
     screenshot_b64: input.screenshot_b64,
     html: input.html,
     prompt: input.prompt,
+    ...(input.responseFormatJson === true ? { responseFormatJson: true } : {}),
   });
   const fetchImpl = input.fetchImpl ?? fetch;
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
